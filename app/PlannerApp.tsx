@@ -1,0 +1,1351 @@
+"use client";
+
+import {
+  type CSSProperties,
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import {
+  calculateCompletionRate,
+  calculateCompletionStreak,
+  generateAutoPlan,
+  getCharacterDialogue,
+  getScheduleStatus,
+  planOccursOnDate,
+  type Weekday,
+} from "../lib/planner";
+
+type PageId = "planner" | "create" | "records";
+type PlannerView = "week" | "today";
+type TodayView = "list" | "circle";
+type PlanStatus = "planned" | "completed" | "incomplete" | "unconfirmed";
+type PlanSource = "manual" | "auto";
+
+type Plan = {
+  id: number;
+  clientId: string;
+  title: string;
+  date: string;
+  start: string;
+  end: string;
+  repeat: number[] | null;
+  category: string | null;
+  memo: string;
+  status: PlanStatus;
+  source: PlanSource;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type PlanDraft = Omit<Plan, "id" | "createdAt" | "updatedAt">;
+
+type AutoTask = {
+  id: string;
+  title: string;
+  minutes: number;
+};
+
+type Reaction = {
+  name: string;
+  line: string;
+  kind: "completed" | "incomplete";
+};
+
+const WEEKDAYS = ["일", "월", "화", "수", "목", "금", "토"];
+const WEEKDAYS_LONG = ["일요일", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일"];
+
+const subscribeToClientId = () => () => {};
+const NAV_ITEMS: { id: PageId; icon: string; label: string }[] = [
+  { id: "planner", icon: "週", label: "내 계획표" },
+  { id: "create", icon: "作", label: "계획 만들기" },
+  { id: "records", icon: "錄", label: "수련 기록" },
+];
+const CATEGORY_COLORS = ["#ad344b", "#4f6b5b", "#b27b42", "#625f5a", "#7a5f80"];
+const CHARACTER_NAMES = ["청명", "백천", "유이설", "조걸", "윤종"] as const;
+
+function pad(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+function toDateKey(date: Date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function formatKoreanDate(date: Date) {
+  return `${date.getMonth() + 1}월 ${date.getDate()}일`;
+}
+
+function startOfWeek(anchor: Date) {
+  const date = new Date(anchor);
+  const day = date.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  date.setDate(date.getDate() + diff);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function getWeekDates(anchor: Date) {
+  const start = startOfWeek(anchor);
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(start);
+    date.setDate(start.getDate() + index);
+    return date;
+  });
+}
+
+function timeToMinutes(time: string) {
+  const [hour, minute] = time.split(":").map(Number);
+  return hour * 60 + minute;
+}
+
+function minutesToTime(minutes: number) {
+  const safe = Math.max(0, Math.min(24 * 60, minutes));
+  return `${pad(Math.floor(safe / 60))}:${pad(safe % 60)}`;
+}
+
+function addDays(date: Date, amount: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + amount);
+  return next;
+}
+
+function planOccursOn(plan: Plan, date: Date) {
+  return planOccursOnDate(plan, toDateKey(date));
+}
+
+function effectiveStatus(
+  plan: Plan,
+  now = new Date(),
+  occurrenceDate = plan.date,
+): PlanStatus {
+  return getScheduleStatus(plan, now, occurrenceDate);
+}
+
+function statusLabel(status: PlanStatus) {
+  if (status === "completed") return "완료";
+  if (status === "incomplete") return "미완료";
+  if (status === "unconfirmed") return "미확인";
+  return "예정";
+}
+
+function statusClass(status: PlanStatus) {
+  if (status === "completed") return "status-completed";
+  if (status === "incomplete") return "status-incomplete";
+  if (status === "unconfirmed") return "status-unconfirmed";
+  return "status-planned";
+}
+
+function getOrCreateClientId() {
+  const storageKey = "maewha-client-id";
+  const existing = window.localStorage.getItem(storageKey);
+  if (existing) return existing;
+  const created = crypto.randomUUID();
+  window.localStorage.setItem(storageKey, created);
+  return created;
+}
+
+async function readJson<T>(response: Response): Promise<T> {
+  const payload = (await response.json()) as T & { error?: string };
+  if (!response.ok) {
+    throw new Error(payload.error || "요청을 처리하지 못했습니다.");
+  }
+  return payload;
+}
+
+function Petals() {
+  return (
+    <div className="petal-layer" aria-hidden="true">
+      {Array.from({ length: 14 }, (_, index) => (
+        <span
+          className="falling-petal"
+          key={index}
+          style={
+            {
+              "--petal-left": `${(index * 19 + 7) % 100}%`,
+              "--petal-delay": `${-(index * 1.4)}s`,
+              "--petal-duration": `${10 + (index % 6) * 1.8}s`,
+              "--petal-size": `${8 + (index % 4) * 3}px`,
+            } as CSSProperties
+          }
+        />
+      ))}
+    </div>
+  );
+}
+
+function EmptyPlanner({ onCreate }: { onCreate: () => void }) {
+  return (
+    <section className="empty-planner paper-card">
+      <div className="empty-branch" aria-hidden="true">
+        <i />
+        <i />
+        <i />
+      </div>
+      <span className="eyebrow">첫 매화를 피울 시간</span>
+      <h2>아직 계획이 없습니다.</h2>
+      <p>오늘의 할 일을 직접 적거나, 목표를 넣어 한 주 계획을 만들어보세요.</p>
+      <button className="seal-button" onClick={onCreate}>
+        계획 만들기
+      </button>
+    </section>
+  );
+}
+
+function WeeklyTimeline({
+  plans,
+  dates,
+  slotMinutes,
+  now,
+  onSelect,
+}: {
+  plans: Plan[];
+  dates: Date[];
+  slotMinutes: 30 | 60;
+  now: Date;
+  onSelect: (plan: Plan) => void;
+}) {
+  const startMinute = 6 * 60;
+  const endMinute = 24 * 60;
+  const slotHeight = slotMinutes === 30 ? 42 : 64;
+  const pixelsPerMinute = slotHeight / slotMinutes;
+  const timelineHeight = (endMinute - startMinute) * pixelsPerMinute;
+  const labels = Array.from(
+    { length: (endMinute - startMinute) / slotMinutes + 1 },
+    (_, index) => startMinute + index * slotMinutes,
+  );
+  const todayKey = toDateKey(now);
+  const currentMinute = now.getHours() * 60 + now.getMinutes();
+  const showCurrentLine =
+    dates.some((date) => toDateKey(date) === todayKey) &&
+    currentMinute >= startMinute &&
+    currentMinute <= endMinute;
+
+  return (
+    <div className="weekly-scroll">
+      <div className="weekly-board" style={{ minWidth: 790 }}>
+        <div className="week-header-spacer">시간</div>
+        <div className="week-days">
+          {dates.map((date) => {
+            const selected = toDateKey(date) === todayKey;
+            return (
+              <div className={selected ? "week-day is-today" : "week-day"} key={toDateKey(date)}>
+                <span>{WEEKDAYS_LONG[date.getDay()]}</span>
+                <strong>{date.getDate()}</strong>
+              </div>
+            );
+          })}
+        </div>
+        <div className="timeline-labels" style={{ height: timelineHeight }}>
+          {labels.map((minute) => (
+            <span
+              key={minute}
+              style={{ top: (minute - startMinute) * pixelsPerMinute }}
+            >
+              {minutesToTime(minute)}
+            </span>
+          ))}
+        </div>
+        <div
+          className="week-grid"
+          style={
+            {
+              height: timelineHeight,
+              "--slot-height": `${slotHeight}px`,
+            } as CSSProperties
+          }
+        >
+          <div className="day-column-lines">
+            {dates.map((date) => (
+              <i key={toDateKey(date)} />
+            ))}
+          </div>
+          {plans.flatMap((plan) =>
+            dates.map((date, dayIndex) => {
+              if (!planOccursOn(plan, date)) return null;
+              const start = Math.max(timeToMinutes(plan.start), startMinute);
+              const end = Math.min(timeToMinutes(plan.end), endMinute);
+              if (end <= start) return null;
+              const occurrenceDate = toDateKey(date);
+              const status = effectiveStatus(plan, now, occurrenceDate);
+              return (
+                <button
+                  className={`schedule-block ${statusClass(status)}`}
+                  key={`${plan.id}-${occurrenceDate}`}
+                  onClick={() => onSelect({ ...plan, date: occurrenceDate })}
+                  style={
+                    {
+                      left: `calc(${dayIndex} * (100% / 7) + 5px)`,
+                      top: (start - startMinute) * pixelsPerMinute + 4,
+                      width: "calc(100% / 7 - 10px)",
+                      height: Math.max(34, (end - start) * pixelsPerMinute - 8),
+                      "--plan-color": plan.category || CATEGORY_COLORS[0],
+                    } as CSSProperties
+                  }
+                  aria-label={`${plan.title}, ${plan.start}부터 ${plan.end}`}
+                >
+                  <strong>{plan.title}</strong>
+                  <span>
+                    {plan.start}–{plan.end}
+                  </span>
+                </button>
+              );
+            }),
+          )}
+          {showCurrentLine ? (
+            <div
+              className="current-time-line"
+              style={{ top: (currentMinute - startMinute) * pixelsPerMinute }}
+            >
+              <b>{minutesToTime(currentMinute)}</b>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CircularDay({ plans }: { plans: Plan[] }) {
+  const sorted = [...plans].sort((a, b) => a.start.localeCompare(b.start));
+  let cursor = 0;
+  const stops: string[] = [];
+  sorted.forEach((plan) => {
+    const start = (timeToMinutes(plan.start) / 1440) * 100;
+    const end = (timeToMinutes(plan.end) / 1440) * 100;
+    if (start > cursor) {
+      stops.push(`rgba(98, 95, 90, 0.11) ${cursor}% ${start}%`);
+    }
+    stops.push(`${plan.category || CATEGORY_COLORS[0]} ${start}% ${end}%`);
+    cursor = Math.max(cursor, end);
+  });
+  if (cursor < 100) stops.push(`rgba(98, 95, 90, 0.11) ${cursor}% 100%`);
+  const background = stops.length
+    ? `conic-gradient(from -90deg, ${stops.join(", ")})`
+    : "conic-gradient(rgba(98, 95, 90, 0.11) 0 100%)";
+
+  return (
+    <div className="circle-layout">
+      <div className="day-circle" style={{ background }}>
+        <div>
+          <span>오늘의 계획</span>
+          <strong>{plans.length}</strong>
+          <small>개의 약속</small>
+        </div>
+        <i className="time-mark mark-0">0</i>
+        <i className="time-mark mark-6">6</i>
+        <i className="time-mark mark-12">12</i>
+        <i className="time-mark mark-18">18</i>
+      </div>
+      <div className="circle-legend">
+        {sorted.length ? (
+          sorted.map((plan) => (
+            <div key={plan.id}>
+              <i style={{ background: plan.category || CATEGORY_COLORS[0] }} />
+              <span>{plan.title}</span>
+              <b>
+                {plan.start}–{plan.end}
+              </b>
+            </div>
+          ))
+        ) : (
+          <p>오늘 등록된 계획이 없습니다.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TodayList({
+  plans,
+  now,
+  onStatus,
+  onDelete,
+}: {
+  plans: Plan[];
+  now: Date;
+  onStatus: (plan: Plan, status: "completed" | "incomplete") => void;
+  onDelete: (plan: Plan) => void;
+}) {
+  const sorted = [...plans].sort((a, b) => a.start.localeCompare(b.start));
+
+  return (
+    <div className="today-list">
+      {sorted.map((plan) => {
+        const status = effectiveStatus(plan, now);
+        return (
+          <article className="today-plan-card paper-card" key={plan.id}>
+            <time>
+              <strong>{plan.start}</strong>
+              <span>{plan.end}</span>
+            </time>
+            <i
+              className="plan-color-bar"
+              style={{ background: plan.category || CATEGORY_COLORS[0] }}
+            />
+            <div className="today-plan-copy">
+              <div>
+                <h3>{plan.title}</h3>
+                <span className={`status-pill ${statusClass(status)}`}>{statusLabel(status)}</span>
+              </div>
+              {plan.memo ? <p>{plan.memo}</p> : <p className="muted">메모 없음</p>}
+              {status === "unconfirmed" ? (
+                <div className="completion-actions">
+                  <button onClick={() => onStatus(plan, "completed")}>완료했어</button>
+                  <button onClick={() => onStatus(plan, "incomplete")}>못 했어</button>
+                </div>
+              ) : null}
+            </div>
+            <button className="quiet-delete" onClick={() => onDelete(plan)} aria-label={`${plan.title} 삭제`}>
+              ×
+            </button>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function UnconfirmedCallout({ count }: { count: number }) {
+  if (!count) return null;
+  return (
+    <aside className="unconfirmed-callout">
+      <div className="five-seals" aria-label="화산오검">
+        {CHARACTER_NAMES.map((name) => (
+          <i key={name}>{name.slice(0, 1)}</i>
+        ))}
+      </div>
+      <div>
+        <strong>뭐야, 왜 안 왔어?</strong>
+        <span>확인하지 않은 계획이 {count}개 있어요.</span>
+      </div>
+    </aside>
+  );
+}
+
+function PlumProgress({ rate }: { rate: number }) {
+  const active = Math.round(rate / 10);
+  return (
+    <div className="plum-progress" aria-label={`매화 개화율 ${rate}%`}>
+      <div className="plum-branch branch-main" />
+      <div className="plum-branch branch-a" />
+      <div className="plum-branch branch-b" />
+      {Array.from({ length: 10 }, (_, index) => (
+        <i className={index < active ? "plum-blossom is-open" : "plum-blossom"} key={index}>
+          <b />
+        </i>
+      ))}
+      <span>이번 주 매화가 {rate}% 피었습니다.</span>
+    </div>
+  );
+}
+
+export function PlannerApp() {
+  const [page, setPage] = useState<PageId>("planner");
+  const [plannerView, setPlannerView] = useState<PlannerView>("week");
+  const [todayView, setTodayView] = useState<TodayView>("list");
+  const [slotMinutes, setSlotMinutes] = useState<30 | 60>(60);
+  const [anchorDate, setAnchorDate] = useState(() => new Date());
+  const [now, setNow] = useState(() => new Date());
+  const clientId = useSyncExternalStore(
+    subscribeToClientId,
+    getOrCreateClientId,
+    () => "",
+  );
+  const [plans, setPlans] = useState<Plan[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [syncMessage, setSyncMessage] = useState("");
+  const [selectedPlan, setSelectedPlan] = useState<Plan | null>(null);
+  const [reaction, setReaction] = useState<Reaction | null>(null);
+  const [reactionIndex, setReactionIndex] = useState(0);
+
+  const weekDates = useMemo(() => getWeekDates(anchorDate), [anchorDate]);
+  const weekPlans = useMemo(
+    () => plans.filter((plan) => weekDates.some((date) => planOccursOn(plan, date))),
+    [plans, weekDates],
+  );
+  const todayPlans = useMemo(() => {
+    const todayKey = toDateKey(now);
+    return plans
+      .filter((plan) => planOccursOn(plan, now))
+      .map((plan) => ({ ...plan, date: todayKey }));
+  }, [now, plans]);
+
+  const loadPlans = useCallback(async (id: string) => {
+    try {
+      const response = await fetch(`/api/plans?clientId=${encodeURIComponent(id)}`, {
+        cache: "no-store",
+      });
+      const payload = await readJson<{ plans: Plan[] }>(response);
+      setPlans(payload.plans);
+    } catch {
+      setSyncMessage("저장소 연결을 준비하고 있습니다. 잠시 후 다시 시도해 주세요.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!clientId) return;
+    const timer = window.setTimeout(() => void loadPlans(clientId), 0);
+    return () => window.clearTimeout(timer);
+  }, [clientId, loadPlans]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!reaction) return;
+    const timer = window.setTimeout(() => setReaction(null), 5200);
+    return () => window.clearTimeout(timer);
+  }, [reaction]);
+
+  const createPlan = useCallback(
+    async (draft: Omit<PlanDraft, "clientId">) => {
+      if (!clientId) throw new Error("저장 준비 중입니다.");
+      const response = await fetch("/api/plans", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...draft, clientId }),
+      });
+      const payload = await readJson<{ plan: Plan }>(response);
+      setPlans((current) => [...current, payload.plan]);
+      return payload.plan;
+    },
+    [clientId],
+  );
+
+  const changeStatus = useCallback(
+    async (plan: Plan, status: "completed" | "incomplete") => {
+      const response = await fetch("/api/plans", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ clientId, id: plan.id, status }),
+      });
+      const payload = await readJson<{ plan: Plan }>(response);
+      setPlans((current) => current.map((item) => (item.id === plan.id ? payload.plan : item)));
+      setSelectedPlan((current) =>
+        current?.id === plan.id
+          ? { ...payload.plan, date: current.date }
+          : current,
+      );
+      const dialogue = getCharacterDialogue(status, reactionIndex);
+      if (dialogue) {
+        setReaction({
+          name: dialogue.character,
+          line: dialogue.message,
+          kind: status,
+        });
+      }
+      setReactionIndex((value) => value + 1);
+    },
+    [clientId, reactionIndex],
+  );
+
+  const deletePlan = useCallback(
+    async (plan: Plan) => {
+      const response = await fetch(
+        `/api/plans?clientId=${encodeURIComponent(clientId)}&id=${plan.id}`,
+        { method: "DELETE" },
+      );
+      await readJson<{ deletedId: number }>(response);
+      setPlans((current) => current.filter((item) => item.id !== plan.id));
+      setSelectedPlan(null);
+    },
+    [clientId],
+  );
+
+  const unconfirmedCount = plans.filter((plan) => effectiveStatus(plan, now) === "unconfirmed").length;
+  const completedPlans = plans.filter((plan) => plan.status === "completed");
+  const decidedPlans = plans.filter(
+    (plan) => plan.status === "completed" || plan.status === "incomplete",
+  );
+  const completionRate = calculateCompletionRate(plans);
+  const currentWeekDates = getWeekDates(now);
+  const currentWeekPlans = plans.filter((plan) =>
+    currentWeekDates.some((date) => planOccursOn(plan, date)),
+  );
+  const weekCompletionRate = calculateCompletionRate(currentWeekPlans);
+  const incompleteCount = plans.filter((plan) => plan.status === "incomplete").length;
+  const streak = calculateCompletionStreak(
+    plans.map((plan) => ({ ...plan, status: effectiveStatus(plan, now) })),
+    toDateKey(now),
+  );
+
+  return (
+    <div className="site-shell">
+      <Petals />
+      <aside className="desktop-sidebar">
+        <div className="brand-block">
+          <strong>매화수련록</strong>
+          <span>MAEWHASURYEONROK</span>
+        </div>
+        <div className="profile-block">
+          <i>梅</i>
+          <div>
+            <strong>수련생</strong>
+            <span>오늘도 한 걸음</span>
+          </div>
+        </div>
+        <nav aria-label="주요 메뉴">
+          {NAV_ITEMS.map((item) => (
+            <button
+              className={page === item.id ? "is-active" : ""}
+              key={item.id}
+              onClick={() => setPage(item.id)}
+            >
+              <i>{item.icon}</i>
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-quote">
+          <i />
+          <p>매화는 추위를 견딘 뒤에야 향기를 낸다.</p>
+        </div>
+      </aside>
+
+      <header className="mobile-header">
+        <i className="mobile-seal">梅</i>
+        <strong>매화수련록</strong>
+        <span>{formatKoreanDate(new Date())}</span>
+      </header>
+
+      <main className="main-content">
+        {page === "planner" ? (
+          <section className="page-section planner-page">
+            <header className="page-heading planner-heading">
+              <div>
+                <span className="eyebrow">나의 한 주</span>
+                <h1>내 계획표</h1>
+                <p>약속한 시간을 지키며 오늘의 매화를 피워보세요.</p>
+              </div>
+              <div className="view-switch" aria-label="계획표 보기 방식">
+                <button
+                  className={plannerView === "week" ? "is-active" : ""}
+                  onClick={() => setPlannerView("week")}
+                >
+                  주간
+                </button>
+                <button
+                  className={plannerView === "today" ? "is-active" : ""}
+                  onClick={() => setPlannerView("today")}
+                >
+                  오늘
+                </button>
+              </div>
+            </header>
+
+            {syncMessage ? (
+              <div className="sync-message">
+                <span>{syncMessage}</span>
+                <button onClick={() => clientId && void loadPlans(clientId)}>다시 연결</button>
+              </div>
+            ) : null}
+
+            {loading ? (
+              <div className="loading-paper paper-card">계획표를 펼치는 중…</div>
+            ) : plans.length === 0 ? (
+              <EmptyPlanner onCreate={() => setPage("create")} />
+            ) : plannerView === "week" ? (
+              <div className="planner-panel paper-card">
+                <div className="planner-toolbar">
+                  <div className="week-navigation">
+                    <button
+                      aria-label="이전 주"
+                      onClick={() => setAnchorDate((date) => addDays(date, -7))}
+                    >
+                      ‹
+                    </button>
+                    <strong>
+                      {weekDates[0].getFullYear()}년 {weekDates[0].getMonth() + 1}월
+                    </strong>
+                    <button
+                      aria-label="다음 주"
+                      onClick={() => setAnchorDate((date) => addDays(date, 7))}
+                    >
+                      ›
+                    </button>
+                  </div>
+                  <div className="slot-switch" aria-label="시간 간격">
+                    <button
+                      className={slotMinutes === 30 ? "is-active" : ""}
+                      onClick={() => setSlotMinutes(30)}
+                    >
+                      30분
+                    </button>
+                    <button
+                      className={slotMinutes === 60 ? "is-active" : ""}
+                      onClick={() => setSlotMinutes(60)}
+                    >
+                      1시간
+                    </button>
+                  </div>
+                </div>
+                {weekPlans.length ? (
+                  <WeeklyTimeline
+                    plans={weekPlans}
+                    dates={weekDates}
+                    slotMinutes={slotMinutes}
+                    now={now}
+                    onSelect={setSelectedPlan}
+                  />
+                ) : (
+                  <div className="week-empty">
+                    <strong>이번 주에는 아직 계획이 없습니다.</strong>
+                    <button onClick={() => setPage("create")}>계획 만들기</button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="today-layout">
+                <div className="today-main">
+                  <div className="today-toolbar paper-card">
+                    <div>
+                      <span className="eyebrow">오늘</span>
+                      <strong>
+                        {formatKoreanDate(new Date())} {WEEKDAYS_LONG[new Date().getDay()]}
+                      </strong>
+                    </div>
+                    <div className="icon-switch">
+                      <button
+                        className={todayView === "list" ? "is-active" : ""}
+                        onClick={() => setTodayView("list")}
+                        aria-label="목록 보기"
+                      >
+                        표
+                      </button>
+                      <button
+                        className={todayView === "circle" ? "is-active" : ""}
+                        onClick={() => setTodayView("circle")}
+                        aria-label="원형 보기"
+                      >
+                        원
+                      </button>
+                    </div>
+                  </div>
+                  <UnconfirmedCallout
+                    count={todayPlans.filter((plan) => effectiveStatus(plan, now) === "unconfirmed").length}
+                  />
+                  {todayPlans.length ? (
+                    todayView === "list" ? (
+                      <TodayList
+                        plans={todayPlans}
+                        now={now}
+                        onStatus={(plan, status) => void changeStatus(plan, status)}
+                        onDelete={(plan) => void deletePlan(plan)}
+                      />
+                    ) : (
+                      <section className="paper-card circle-card">
+                        <CircularDay plans={todayPlans} />
+                      </section>
+                    )
+                  ) : (
+                    <EmptyPlanner onCreate={() => setPage("create")} />
+                  )}
+                </div>
+                <aside className="today-summary paper-card">
+                  <span className="eyebrow">오늘의 흐름</span>
+                  <strong>{todayPlans.length}개의 계획</strong>
+                  <div>
+                    <b>{todayPlans.filter((plan) => plan.status === "completed").length}</b>
+                    <span>완료</span>
+                  </div>
+                  <div>
+                    <b>{todayPlans.filter((plan) => effectiveStatus(plan, now) === "unconfirmed").length}</b>
+                    <span>미확인</span>
+                  </div>
+                </aside>
+              </div>
+            )}
+          </section>
+        ) : null}
+
+        {page === "create" ? (
+          <CreatePlanPage
+            clientReady={Boolean(clientId)}
+            onCreate={createPlan}
+            onFinished={() => {
+              setPage("planner");
+              setPlannerView("week");
+              setAnchorDate(new Date());
+            }}
+          />
+        ) : null}
+
+        {page === "records" ? (
+          <section className="page-section records-page">
+            <header className="page-heading">
+              <div>
+                <span className="eyebrow">쌓인 발자국</span>
+                <h1>수련 기록</h1>
+                <p>결과를 탓하기보다, 다시 이어갈 자리를 확인하세요.</p>
+              </div>
+            </header>
+            {plans.length === 0 ? (
+              <EmptyPlanner onCreate={() => setPage("create")} />
+            ) : (
+              <>
+                <div className="record-grid">
+                  <article className="paper-card stat-card">
+                    <span>전체 완료율</span>
+                    <strong>{completionRate}%</strong>
+                    <small>{decidedPlans.length}개 중 {completedPlans.length}개 완료</small>
+                  </article>
+                  <article className="paper-card stat-card">
+                    <span>연속 달성</span>
+                    <strong>{streak}일</strong>
+                    <small>오늘까지 이어진 기록</small>
+                  </article>
+                  <article className="paper-card stat-card">
+                    <span>확인이 필요해요</span>
+                    <strong>{unconfirmedCount}개</strong>
+                    <small>놓치지 말고 결과를 남겨주세요</small>
+                  </article>
+                  <article className="paper-card stat-card">
+                    <span>다시 도전할 계획</span>
+                    <strong>{incompleteCount}개</strong>
+                    <small>실패가 아니라 다음 수련의 단서</small>
+                  </article>
+                </div>
+                <div className="record-detail-grid">
+                  <article className="paper-card blossom-card">
+                    <div>
+                      <span className="eyebrow">이번 주 개화</span>
+                      <h2>꾸준함이 매화를 피웁니다</h2>
+                    </div>
+                    <PlumProgress rate={weekCompletionRate} />
+                  </article>
+                  <article className="paper-card recent-records">
+                    <div>
+                      <span className="eyebrow">최근 기록</span>
+                      <h2>수련 발자국</h2>
+                    </div>
+                    <ul>
+                      {[...plans]
+                        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+                        .slice(0, 6)
+                        .map((plan) => {
+                          const status = effectiveStatus(plan, now);
+                          return (
+                            <li key={plan.id}>
+                              <i style={{ background: plan.category || CATEGORY_COLORS[0] }} />
+                              <div>
+                                <strong>{plan.title}</strong>
+                                <span>{plan.date} · {plan.start}</span>
+                              </div>
+                              <b className={statusClass(status)}>{statusLabel(status)}</b>
+                            </li>
+                          );
+                        })}
+                    </ul>
+                  </article>
+                </div>
+              </>
+            )}
+          </section>
+        ) : null}
+      </main>
+
+      <nav className="mobile-bottom-nav" aria-label="주요 메뉴">
+        {NAV_ITEMS.map((item) => (
+          <button
+            className={page === item.id ? "is-active" : ""}
+            key={item.id}
+            onClick={() => setPage(item.id)}
+          >
+            <i>{item.icon}</i>
+            <span>{item.label}</span>
+          </button>
+        ))}
+      </nav>
+
+      {selectedPlan ? (
+        <div className="sheet-backdrop" onClick={() => setSelectedPlan(null)}>
+          <section className="plan-sheet" onClick={(event) => event.stopPropagation()}>
+            <i className="sheet-handle" />
+            <span className="eyebrow">계획 상세</span>
+            <h2>{selectedPlan.title}</h2>
+            <dl>
+              <div>
+                <dt>날짜</dt>
+                <dd>{selectedPlan.date}</dd>
+              </div>
+              <div>
+                <dt>시간</dt>
+                <dd>{selectedPlan.start}–{selectedPlan.end}</dd>
+              </div>
+              <div>
+                <dt>상태</dt>
+                <dd>{statusLabel(effectiveStatus(selectedPlan, now))}</dd>
+              </div>
+            </dl>
+            {selectedPlan.memo ? <p>{selectedPlan.memo}</p> : null}
+            {effectiveStatus(selectedPlan, now) === "unconfirmed" ? (
+              <div className="sheet-actions">
+                <button onClick={() => void changeStatus(selectedPlan, "completed")}>완료했어</button>
+                <button onClick={() => void changeStatus(selectedPlan, "incomplete")}>못 했어</button>
+              </div>
+            ) : null}
+            <button className="sheet-delete" onClick={() => void deletePlan(selectedPlan)}>
+              이 계획 삭제
+            </button>
+          </section>
+        </div>
+      ) : null}
+
+      {reaction ? (
+        <aside className={`reaction-toast reaction-${reaction.kind}`}>
+          <i>{reaction.name.slice(0, 1)}</i>
+          <div>
+            <span>{reaction.name}</span>
+            <strong>{reaction.line}</strong>
+          </div>
+          <button onClick={() => setReaction(null)} aria-label="닫기">×</button>
+        </aside>
+      ) : null}
+    </div>
+  );
+}
+
+function CreatePlanPage({
+  clientReady,
+  onCreate,
+  onFinished,
+}: {
+  clientReady: boolean;
+  onCreate: (draft: Omit<PlanDraft, "clientId">) => Promise<Plan>;
+  onFinished: () => void;
+}) {
+  const [mode, setMode] = useState<"manual" | "auto">("manual");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const todayKey = toDateKey(new Date());
+
+  const [title, setTitle] = useState("");
+  const [date, setDate] = useState(todayKey);
+  const [start, setStart] = useState("09:00");
+  const [end, setEnd] = useState("10:00");
+  const [repeat, setRepeat] = useState<number[]>([]);
+  const [category, setCategory] = useState(CATEGORY_COLORS[0]);
+  const [memo, setMemo] = useState("");
+
+  const [tasks, setTasks] = useState<AutoTask[]>([
+    { id: crypto.randomUUID(), title: "", minutes: 60 },
+  ]);
+  const [autoStartDate, setAutoStartDate] = useState(todayKey);
+  const [autoEndDate, setAutoEndDate] = useState(toDateKey(addDays(new Date(), 7)));
+  const [allowedDays, setAllowedDays] = useState<number[]>([1, 2, 3, 4, 5]);
+  const [availableStart, setAvailableStart] = useState("18:00");
+  const [availableEnd, setAvailableEnd] = useState("22:00");
+  const [maxMinutes, setMaxMinutes] = useState(120);
+  const [autoSlot, setAutoSlot] = useState<30 | 60>(30);
+  const [preview, setPreview] = useState<Omit<PlanDraft, "clientId">[]>([]);
+
+  const toggleDay = (day: number, setter: (days: number[]) => void, values: number[]) => {
+    setter(values.includes(day) ? values.filter((value) => value !== day) : [...values, day]);
+  };
+
+  const submitManual = async (event: FormEvent) => {
+    event.preventDefault();
+    setMessage("");
+    if (!title.trim()) {
+      setMessage("계획 이름을 적어주세요.");
+      return;
+    }
+    if (timeToMinutes(end) <= timeToMinutes(start)) {
+      setMessage("끝나는 시간은 시작 시간보다 늦어야 합니다.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await onCreate({
+        title: title.trim(),
+        date,
+        start,
+        end,
+        repeat: repeat.length ? repeat : null,
+        category,
+        memo: memo.trim(),
+        status: "planned",
+        source: "manual",
+      });
+      onFinished();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "계획을 저장하지 못했습니다.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const makePreview = () => {
+    setMessage("");
+    const validTasks = tasks.filter((task) => task.title.trim() && task.minutes > 0);
+    if (!validTasks.length) {
+      setMessage("자동으로 나눌 할 일을 하나 이상 적어주세요.");
+      return;
+    }
+    if (!allowedDays.length) {
+      setMessage("계획을 배치할 요일을 골라주세요.");
+      return;
+    }
+    const dayCapacity = Math.min(
+      maxMinutes,
+      Math.max(0, timeToMinutes(availableEnd) - timeToMinutes(availableStart)),
+    );
+    if (dayCapacity < autoSlot) {
+      setMessage("가능 시간과 하루 최대 시간을 확인해 주세요.");
+      return;
+    }
+
+    try {
+      const result = generateAutoPlan({
+        tasks: validTasks.map((task, index) => ({
+          id: task.id,
+          title: task.title,
+          totalMinutes: task.minutes,
+          category: CATEGORY_COLORS[index % CATEGORY_COLORS.length],
+          memo: "자동 생성된 계획",
+        })),
+        startDate: autoStartDate,
+        endDate: autoEndDate,
+        allowedWeekdays: allowedDays as Weekday[],
+        availability: allowedDays.map((weekday) => ({
+          weekday: weekday as Weekday,
+          startTime: availableStart,
+          endTime: availableEnd,
+        })),
+        maxMinutesPerDay: maxMinutes,
+        slotMinutes: autoSlot,
+      });
+      const generated: Omit<PlanDraft, "clientId">[] = result.plans.map(
+        ({ title, date, start, end, repeat, category, memo, status, source }) => ({
+          title,
+          date,
+          start,
+          end,
+          repeat: repeat.length ? repeat : null,
+          category,
+          memo,
+          status,
+          source,
+        }),
+      );
+      setPreview(generated);
+      if (result.unscheduledMinutes > 0) {
+        setMessage(
+          `기간이 짧아 ${result.unscheduledMinutes}분을 배치하지 못했습니다. 기간이나 하루 시간을 늘려주세요.`,
+        );
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "자동 계획을 만들지 못했습니다.");
+    }
+  };
+
+  const savePreview = async () => {
+    if (!preview.length) return;
+    setSaving(true);
+    setMessage("");
+    try {
+      for (const item of preview) {
+        await onCreate(item);
+      }
+      onFinished();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "계획표를 저장하지 못했습니다.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="page-section create-page">
+      <header className="page-heading create-heading">
+        <div>
+          <span className="eyebrow">새로운 약속</span>
+          <h1>계획 만들기</h1>
+          <p>직접 한 칸을 채우거나, 목표를 가능한 시간에 고르게 나눠보세요.</p>
+        </div>
+        <div className="mode-tabs">
+          <button className={mode === "manual" ? "is-active" : ""} onClick={() => setMode("manual")}>
+            직접 작성
+          </button>
+          <button className={mode === "auto" ? "is-active" : ""} onClick={() => setMode("auto")}>
+            자동 생성
+          </button>
+        </div>
+      </header>
+
+      {mode === "manual" ? (
+        <form className="create-grid" onSubmit={submitManual}>
+          <div className="paper-card form-paper">
+            <div className="form-section-title">
+              <i>一</i>
+              <div>
+                <span>기본 정보</span>
+                <strong>언제, 무엇을 할까요?</strong>
+              </div>
+            </div>
+            <label className="field full-field">
+              <span>계획 이름</span>
+              <input
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="예: 영어 단어 복습"
+                maxLength={80}
+              />
+            </label>
+            <div className="field-row">
+              <label className="field">
+                <span>날짜</span>
+                <input type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+              </label>
+              <label className="field">
+                <span>시작 시간</span>
+                <input type="time" value={start} onChange={(event) => setStart(event.target.value)} />
+              </label>
+              <label className="field">
+                <span>종료 시간</span>
+                <input type="time" value={end} onChange={(event) => setEnd(event.target.value)} />
+              </label>
+            </div>
+            <fieldset className="day-fieldset">
+              <legend>반복 요일 <small>선택하지 않으면 한 번만 실행</small></legend>
+              <div>
+                {WEEKDAYS.map((label, day) => (
+                  <button
+                    type="button"
+                    className={repeat.includes(day) ? "is-active" : ""}
+                    key={label}
+                    onClick={() => toggleDay(day, setRepeat, repeat)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+            <fieldset className="color-fieldset">
+              <legend>분류 색상</legend>
+              <div>
+                {CATEGORY_COLORS.map((color) => (
+                  <button
+                    type="button"
+                    className={category === color ? "is-active" : ""}
+                    style={{ background: color }}
+                    key={color}
+                    onClick={() => setCategory(color)}
+                    aria-label={`${color} 색상 선택`}
+                  />
+                ))}
+              </div>
+            </fieldset>
+            <label className="field full-field">
+              <span>메모 <small>선택</small></span>
+              <textarea
+                value={memo}
+                onChange={(event) => setMemo(event.target.value)}
+                placeholder="기억할 내용을 적어주세요."
+                rows={3}
+                maxLength={300}
+              />
+            </label>
+          </div>
+          <aside className="paper-card save-paper">
+            <span className="eyebrow">미리보기</span>
+            <div className="mini-plan-preview" style={{ "--plan-color": category } as CSSProperties}>
+              <time>{start}</time>
+              <i />
+              <div>
+                <strong>{title || "계획 이름"}</strong>
+                <span>{date} · {start}–{end}</span>
+              </div>
+            </div>
+            {message ? <p className="form-message">{message}</p> : null}
+            <button className="seal-button full-button" disabled={saving || !clientReady}>
+              {saving ? "저장하는 중…" : "계획표에 저장"}
+            </button>
+          </aside>
+        </form>
+      ) : (
+        <div className="auto-create-grid">
+          <div className="paper-card form-paper">
+            <div className="form-section-title">
+              <i>自</i>
+              <div>
+                <span>자동 배치</span>
+                <strong>목표를 가능한 시간에 나눕니다</strong>
+              </div>
+            </div>
+            <div className="task-builder">
+              <label>해야 할 일</label>
+              {tasks.map((task, index) => (
+                <div className="task-row" key={task.id}>
+                  <input
+                    value={task.title}
+                    onChange={(event) =>
+                      setTasks((current) =>
+                        current.map((item) =>
+                          item.id === task.id ? { ...item, title: event.target.value } : item,
+                        ),
+                      )
+                    }
+                    placeholder={`할 일 ${index + 1}`}
+                    maxLength={80}
+                  />
+                  <input
+                    type="number"
+                    min={30}
+                    step={30}
+                    value={task.minutes}
+                    onChange={(event) =>
+                      setTasks((current) =>
+                        current.map((item) =>
+                          item.id === task.id
+                            ? { ...item, minutes: Number(event.target.value) }
+                            : item,
+                        ),
+                      )
+                    }
+                    aria-label={`${index + 1}번째 할 일의 총 소요 시간`}
+                  />
+                  <span>분</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setTasks((current) =>
+                        current.length === 1 ? current : current.filter((item) => item.id !== task.id),
+                      )
+                    }
+                    aria-label={`${index + 1}번째 할 일 삭제`}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="add-task"
+                onClick={() =>
+                  setTasks((current) => [
+                    ...current,
+                    { id: crypto.randomUUID(), title: "", minutes: 60 },
+                  ])
+                }
+              >
+                + 할 일 추가
+              </button>
+            </div>
+            <div className="field-row two-columns">
+              <label className="field">
+                <span>시작일</span>
+                <input
+                  type="date"
+                  value={autoStartDate}
+                  onChange={(event) => setAutoStartDate(event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>마감일</span>
+                <input
+                  type="date"
+                  value={autoEndDate}
+                  min={autoStartDate}
+                  onChange={(event) => setAutoEndDate(event.target.value)}
+                />
+              </label>
+            </div>
+            <fieldset className="day-fieldset">
+              <legend>가능한 요일</legend>
+              <div>
+                {WEEKDAYS.map((label, day) => (
+                  <button
+                    type="button"
+                    className={allowedDays.includes(day) ? "is-active" : ""}
+                    key={label}
+                    onClick={() => toggleDay(day, setAllowedDays, allowedDays)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+            <div className="field-row auto-time-row">
+              <label className="field">
+                <span>가능 시작</span>
+                <input
+                  type="time"
+                  value={availableStart}
+                  onChange={(event) => setAvailableStart(event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>가능 종료</span>
+                <input
+                  type="time"
+                  value={availableEnd}
+                  onChange={(event) => setAvailableEnd(event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>하루 최대</span>
+                <select value={maxMinutes} onChange={(event) => setMaxMinutes(Number(event.target.value))}>
+                  <option value={60}>1시간</option>
+                  <option value={120}>2시간</option>
+                  <option value={180}>3시간</option>
+                  <option value={240}>4시간</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>계획 단위</span>
+                <select
+                  value={autoSlot}
+                  onChange={(event) => setAutoSlot(Number(event.target.value) as 30 | 60)}
+                >
+                  <option value={30}>30분</option>
+                  <option value={60}>1시간</option>
+                </select>
+              </label>
+            </div>
+            <button type="button" className="outline-button" onClick={makePreview}>
+              자동 계획 만들기
+            </button>
+          </div>
+          <aside className="paper-card auto-preview-paper">
+            <span className="eyebrow">배치 미리보기</span>
+            <h2>{preview.length ? `${preview.length}개의 일정` : "아직 생성 전입니다"}</h2>
+            <div className="auto-preview-list">
+              {preview.length ? (
+                preview.slice(0, 12).map((item, index) => (
+                  <article key={`${item.date}-${item.start}-${index}`}>
+                    <time>{item.date.slice(5)}</time>
+                    <i style={{ background: item.category || CATEGORY_COLORS[0] }} />
+                    <div>
+                      <strong>{item.title}</strong>
+                      <span>{item.start}–{item.end}</span>
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <p>할 일과 가능한 시간을 입력하면 이곳에 배치 결과가 나타납니다.</p>
+              )}
+            </div>
+            {message ? <p className="form-message">{message}</p> : null}
+            <button
+              type="button"
+              className="seal-button full-button"
+              onClick={() => void savePreview()}
+              disabled={!preview.length || saving || !clientReady}
+            >
+              {saving ? "저장하는 중…" : "계획표에 저장"}
+            </button>
+          </aside>
+        </div>
+      )}
+    </section>
+  );
+}
