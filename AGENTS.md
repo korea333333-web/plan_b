@@ -10,27 +10,32 @@
 ## 저장소 지도
 
 - `app/PlannerApp.tsx`: 세 화면, 폼, 시간표, 기록을 포함한 단일 클라이언트 앱
-- `app/api/plans/route.ts`: 계획 조회·생성·상태 변경·삭제 API
+- `app/api/plans/route.ts`: vinext/Sites용 계획 조회·생성·상태 변경·삭제 API
 - `app/globals.css`: 반응형 레이아웃과 매화·한지 디자인
 - `lib/planner.ts`: 자동 배치, 날짜, 상태, 통계, 확정 대사
 - `db/schema.ts`: 단일 `plans` D1 테이블
 - `tests/`: 도메인 및 서버 렌더링 테스트
-- `.openai/hosting.json`: `DB` D1 바인딩
+- `.openai/hosting.json`: 로컬·Sites의 `DB` D1 바인딩
 
 ## 현재 제품 불변 조건
 
 - 화면은 `내 계획표 / 계획 만들기 / 수련 기록` 세 탭이며 URL은 `/` 하나다.
 - 모바일은 하단 내비게이션, 920px 초과 화면은 좌측 사이드바를 사용한다.
-- 빈 DB에는 가짜 일정 대신 `아직 계획이 없습니다.`와 `계획 만들기`가 나온다.
+- 현재 환경의 저장소가 비어 있으면 가짜 일정 대신 `아직 계획이 없습니다.`와 `계획 만들기`가 나온다.
 - 주간/오늘, 30분/1시간, 오늘의 표/원형 보기를 지원한다.
 - 종료 전은 `예정`, 종료 후 미판정 상태는 `미확인`이다. 자동 미완료 처리는 없다.
 - 대사는 `lib/planner.ts`가 단일 기준이며 문구를 임의로 고치지 않는다.
 - 캐릭터 사진과 웹툰 원본 이미지는 아직 넣지 않는다.
-- 일정은 D1에 저장하지만 브라우저 `localStorage`의 `clientId`로 구분한다. 로그인과 교차 기기 동기화는 없다.
+- 로컬·Sites는 vinext와 D1을 사용한다. D1 행은 브라우저 `localStorage`의 `clientId`로 구분한다.
+- 로컬·Sites에서 D1 API를 쓸 수 없으면 현재 세션은 브라우저 계획 저장으로 전환되고 안내 배너를 표시한다.
+- Vercel은 `next build` 결과를 실행하고 계획 자체를 브라우저 `localStorage`에 저장한다. Vercel에서 D1 서버 동기화는 없다.
+- 어느 환경에도 로그인이나 교차 기기 동기화는 없다.
 
 ## 구현상 주의
 
-- 자동 생성 미리보기 저장은 현재 일정별 순차 POST다. 원자적 일괄 저장으로 가정하지 않는다.
+- 로컬·Sites의 자동 생성 저장은 일정별 순차 POST다. 원자적 일괄 저장으로 가정하지 않는다.
+- Vercel의 브라우저 저장을 D1 저장이나 서버 백업처럼 설명하지 않는다.
+- 브라우저 폴백 계획과 D1 계획은 자동 병합되지 않는다.
 - 반복 일정은 한 DB 행을 여러 요일에 보여 주며 판정도 행 전체에 적용된다.
 - 반응 순번과 보기 설정은 React 상태라 새로고침 후 초기화된다.
 - 날짜·시간은 `YYYY-MM-DD`, `HH:mm` 문자열로 저장한다. UTC 저장이나 고정 KST 변환이 구현됐다고 가정하지 않는다.
@@ -42,6 +47,9 @@
 
 ```bash
 pnpm run lint
-pnpm run build
 pnpm test
+pnpm run build
+pnpm exec next build
 ```
+
+`pnpm run build`/`pnpm test`는 vinext·Sites 경로, `pnpm exec next build`는 Vercel 경로를 확인한다.

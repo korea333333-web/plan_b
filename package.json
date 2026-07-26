@@ -4,11 +4,13 @@
   "private": true,
   "packageManager": "pnpm@11.9.0",
   "engines": {
-    "node": ">=22.13.0"
+    "node": "22.x"
   },
   "scripts": {
     "dev": "vinext dev",
-    "build": "vinext build",
+    "build": "node scripts/build.mjs",
+    "build:sites": "vinext build",
+    "build:vercel": "next build",
     "start": "vinext start",
     "test": "node --test tests/planner-engine.test.mjs && vinext build && node --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",

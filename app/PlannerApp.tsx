@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -24,6 +25,7 @@ type PlannerView = "week" | "today";
 type TodayView = "list" | "circle";
 type PlanStatus = "planned" | "completed" | "incomplete" | "unconfirmed";
 type PlanSource = "manual" | "auto";
+type StorageMode = "server" | "local";
 
 type Plan = {
   id: number;
@@ -66,6 +68,9 @@ const NAV_ITEMS: { id: PageId; icon: string; label: string }[] = [
 ];
 const CATEGORY_COLORS = ["#ad344b", "#4f6b5b", "#b27b42", "#625f5a", "#7a5f80"];
 const CHARACTER_NAMES = ["청명", "백천", "유이설", "조걸", "윤종"] as const;
+const LOCAL_PLAN_STORAGE_PREFIX = "maewha-plans:";
+const BROWSER_ONLY_STORAGE =
+  process.env.NEXT_PUBLIC_PLAN_STORAGE_MODE === "local";
 
 function pad(value: number) {
   return String(value).padStart(2, "0");
@@ -141,19 +146,104 @@ function statusClass(status: PlanStatus) {
 
 function getOrCreateClientId() {
   const storageKey = "maewha-client-id";
-  const existing = window.localStorage.getItem(storageKey);
-  if (existing) return existing;
   const created = crypto.randomUUID();
-  window.localStorage.setItem(storageKey, created);
+
+  try {
+    const existing = window.localStorage.getItem(storageKey);
+    if (existing) return existing;
+    window.localStorage.setItem(storageKey, created);
+  } catch {
+    // Private browsing or a locked-down browser may not expose localStorage.
+  }
+
   return created;
+}
+
+class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
 }
 
 async function readJson<T>(response: Response): Promise<T> {
   const payload = (await response.json()) as T & { error?: string };
   if (!response.ok) {
-    throw new Error(payload.error || "요청을 처리하지 못했습니다.");
+    throw new ApiRequestError(
+      payload.error || "요청을 처리하지 못했습니다.",
+      response.status,
+    );
   }
   return payload;
+}
+
+function shouldUseLocalFallback(error: unknown) {
+  return (
+    !(error instanceof ApiRequestError) ||
+    error.status === 404 ||
+    error.status >= 500
+  );
+}
+
+function localPlanStorageKey(clientId: string) {
+  return `${LOCAL_PLAN_STORAGE_PREFIX}${clientId}`;
+}
+
+function isStoredPlan(value: unknown, clientId: string): value is Plan {
+  if (!value || typeof value !== "object") return false;
+  const plan = value as Partial<Plan>;
+
+  return (
+    typeof plan.id === "number" &&
+    Number.isSafeInteger(plan.id) &&
+    plan.clientId === clientId &&
+    typeof plan.title === "string" &&
+    typeof plan.date === "string" &&
+    typeof plan.start === "string" &&
+    typeof plan.end === "string" &&
+    (plan.repeat === null ||
+      (Array.isArray(plan.repeat) &&
+        plan.repeat.every((day) => Number.isInteger(day) && day >= 0 && day <= 6))) &&
+    (plan.category === null || typeof plan.category === "string") &&
+    typeof plan.memo === "string" &&
+    ["planned", "completed", "incomplete", "unconfirmed"].includes(
+      plan.status ?? "",
+    ) &&
+    ["manual", "auto"].includes(plan.source ?? "") &&
+    typeof plan.createdAt === "string" &&
+    typeof plan.updatedAt === "string"
+  );
+}
+
+function readLocalPlans(clientId: string): Plan[] {
+  try {
+    const stored = window.localStorage.getItem(localPlanStorageKey(clientId));
+    if (!stored) return [];
+    const parsed: unknown = JSON.parse(stored);
+    return Array.isArray(parsed)
+      ? parsed.filter((plan) => isStoredPlan(plan, clientId))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalPlans(clientId: string, plansToStore: Plan[]) {
+  try {
+    window.localStorage.setItem(
+      localPlanStorageKey(clientId),
+      JSON.stringify(plansToStore),
+    );
+  } catch {
+    throw new Error("브라우저 저장 공간을 사용할 수 없습니다.");
+  }
+}
+
+function makeLocalPlanId() {
+  const random = crypto.getRandomValues(new Uint16Array(1))[0];
+  return -(Date.now() * 1_000 + random);
 }
 
 function Petals() {
@@ -456,11 +546,36 @@ export function PlannerApp() {
     () => "",
   );
   const [plans, setPlans] = useState<Plan[]>([]);
+  const plansRef = useRef<Plan[]>([]);
+  const storageModeRef = useRef<StorageMode>(
+    BROWSER_ONLY_STORAGE ? "local" : "server",
+  );
+  const [storageMode, setStorageMode] = useState<StorageMode>(
+    BROWSER_ONLY_STORAGE ? "local" : "server",
+  );
   const [loading, setLoading] = useState(true);
-  const [syncMessage, setSyncMessage] = useState("");
   const [selectedPlan, setSelectedPlan] = useState<Plan | null>(null);
   const [reaction, setReaction] = useState<Reaction | null>(null);
   const [reactionIndex, setReactionIndex] = useState(0);
+
+  const replacePlans = useCallback((nextPlans: Plan[]) => {
+    plansRef.current = nextPlans;
+    setPlans(nextPlans);
+  }, []);
+
+  const setActiveStorageMode = useCallback((mode: StorageMode) => {
+    storageModeRef.current = mode;
+    setStorageMode(mode);
+  }, []);
+
+  const replaceWithLocalPlans = useCallback(
+    (id: string, nextPlans: Plan[]) => {
+      writeLocalPlans(id, nextPlans);
+      replacePlans(nextPlans);
+      setActiveStorageMode("local");
+    },
+    [replacePlans, setActiveStorageMode],
+  );
 
   const weekDates = useMemo(() => getWeekDates(anchorDate), [anchorDate]);
   const weekPlans = useMemo(
@@ -475,18 +590,28 @@ export function PlannerApp() {
   }, [now, plans]);
 
   const loadPlans = useCallback(async (id: string) => {
+    if (BROWSER_ONLY_STORAGE) {
+      replacePlans(readLocalPlans(id));
+      setActiveStorageMode("local");
+      setLoading(false);
+      return;
+    }
+
     try {
       const response = await fetch(`/api/plans?clientId=${encodeURIComponent(id)}`, {
         cache: "no-store",
       });
       const payload = await readJson<{ plans: Plan[] }>(response);
-      setPlans(payload.plans);
-    } catch {
-      setSyncMessage("저장소 연결을 준비하고 있습니다. 잠시 후 다시 시도해 주세요.");
+      replacePlans(payload.plans);
+      setActiveStorageMode("server");
+    } catch (error) {
+      if (!shouldUseLocalFallback(error)) throw error;
+      replacePlans(readLocalPlans(id));
+      setActiveStorageMode("local");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [replacePlans, setActiveStorageMode]);
 
   useEffect(() => {
     if (!clientId) return;
@@ -508,30 +633,84 @@ export function PlannerApp() {
   const createPlan = useCallback(
     async (draft: Omit<PlanDraft, "clientId">) => {
       if (!clientId) throw new Error("저장 준비 중입니다.");
-      const response = await fetch("/api/plans", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...draft, clientId }),
-      });
-      const payload = await readJson<{ plan: Plan }>(response);
-      setPlans((current) => [...current, payload.plan]);
-      return payload.plan;
+
+      const saveInBrowser = () => {
+        const now = new Date().toISOString();
+        const localPlan: Plan = {
+          ...draft,
+          id: makeLocalPlanId(),
+          clientId,
+          createdAt: now,
+          updatedAt: now,
+        };
+        replaceWithLocalPlans(clientId, [...plansRef.current, localPlan]);
+        return localPlan;
+      };
+
+      if (storageModeRef.current === "local") return saveInBrowser();
+
+      try {
+        const response = await fetch("/api/plans", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ...draft, clientId }),
+        });
+        const payload = await readJson<{ plan: Plan }>(response);
+        replacePlans([...plansRef.current, payload.plan]);
+        return payload.plan;
+      } catch (error) {
+        if (!shouldUseLocalFallback(error)) throw error;
+        return saveInBrowser();
+      }
     },
-    [clientId],
+    [clientId, replacePlans, replaceWithLocalPlans],
   );
 
   const changeStatus = useCallback(
     async (plan: Plan, status: "completed" | "incomplete") => {
-      const response = await fetch("/api/plans", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ clientId, id: plan.id, status }),
-      });
-      const payload = await readJson<{ plan: Plan }>(response);
-      setPlans((current) => current.map((item) => (item.id === plan.id ? payload.plan : item)));
+      const updateInBrowser = () => {
+        const storedPlan =
+          plansRef.current.find((item) => item.id === plan.id) ?? plan;
+        const updatedPlan: Plan = {
+          ...storedPlan,
+          status,
+          updatedAt: new Date().toISOString(),
+        };
+        replaceWithLocalPlans(
+          clientId,
+          plansRef.current.map((item) =>
+            item.id === plan.id ? updatedPlan : item,
+          ),
+        );
+        return updatedPlan;
+      };
+
+      let updatedPlan: Plan;
+      if (storageModeRef.current === "local") {
+        updatedPlan = updateInBrowser();
+      } else {
+        try {
+          const response = await fetch("/api/plans", {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ clientId, id: plan.id, status }),
+          });
+          const payload = await readJson<{ plan: Plan }>(response);
+          updatedPlan = payload.plan;
+          replacePlans(
+            plansRef.current.map((item) =>
+              item.id === plan.id ? updatedPlan : item,
+            ),
+          );
+        } catch (error) {
+          if (!shouldUseLocalFallback(error)) throw error;
+          updatedPlan = updateInBrowser();
+        }
+      }
+
       setSelectedPlan((current) =>
         current?.id === plan.id
-          ? { ...payload.plan, date: current.date }
+          ? { ...updatedPlan, date: current.date }
           : current,
       );
       const dialogue = getCharacterDialogue(status, reactionIndex);
@@ -544,20 +723,39 @@ export function PlannerApp() {
       }
       setReactionIndex((value) => value + 1);
     },
-    [clientId, reactionIndex],
+    [clientId, reactionIndex, replacePlans, replaceWithLocalPlans],
   );
 
   const deletePlan = useCallback(
     async (plan: Plan) => {
-      const response = await fetch(
-        `/api/plans?clientId=${encodeURIComponent(clientId)}&id=${plan.id}`,
-        { method: "DELETE" },
-      );
-      await readJson<{ deletedId: number }>(response);
-      setPlans((current) => current.filter((item) => item.id !== plan.id));
+      const deleteInBrowser = () => {
+        replaceWithLocalPlans(
+          clientId,
+          plansRef.current.filter((item) => item.id !== plan.id),
+        );
+      };
+
+      if (storageModeRef.current === "local") {
+        deleteInBrowser();
+      } else {
+        try {
+          const response = await fetch(
+            `/api/plans?clientId=${encodeURIComponent(clientId)}&id=${plan.id}`,
+            { method: "DELETE" },
+          );
+          await readJson<{ deletedId: number }>(response);
+          replacePlans(
+            plansRef.current.filter((item) => item.id !== plan.id),
+          );
+        } catch (error) {
+          if (!shouldUseLocalFallback(error)) throw error;
+          deleteInBrowser();
+        }
+      }
+
       setSelectedPlan(null);
     },
-    [clientId],
+    [clientId, replacePlans, replaceWithLocalPlans],
   );
 
   const unconfirmedCount = plans.filter((plan) => effectiveStatus(plan, now) === "unconfirmed").length;
@@ -617,6 +815,17 @@ export function PlannerApp() {
       </header>
 
       <main className="main-content">
+        {storageMode === "local" ? (
+          <div className="sync-message" role="status">
+            <span>이 브라우저에 저장 중</span>
+            {!BROWSER_ONLY_STORAGE ? (
+              <button onClick={() => clientId && void loadPlans(clientId)}>
+                서버 다시 연결
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
         {page === "planner" ? (
           <section className="page-section planner-page">
             <header className="page-heading planner-heading">
@@ -640,13 +849,6 @@ export function PlannerApp() {
                 </button>
               </div>
             </header>
-
-            {syncMessage ? (
-              <div className="sync-message">
-                <span>{syncMessage}</span>
-                <button onClick={() => clientId && void loadPlans(clientId)}>다시 연결</button>
-              </div>
-            ) : null}
 
             {loading ? (
               <div className="loading-paper paper-card">계획표를 펼치는 중…</div>

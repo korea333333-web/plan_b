@@ -10,7 +10,7 @@
 - 완료·미완료·미확인 상태 판정
 - 화산오검 순환 반응 대사
 - 완료율, 연속 달성일, 최근 기록
-- 브라우저별 익명 `clientId`와 Cloudflare D1을 이용한 저장
+- Sites에서는 Cloudflare D1, Vercel에서는 현재 브라우저에 계획 저장
 
 캐릭터 이미지는 포함하지 않았으며 현재는 이름 인장으로 표시합니다.
 
@@ -37,3 +37,12 @@ pnpm test
 ```
 
 제품 기준과 구조적 결정은 `docs/`에 정리되어 있습니다.
+
+## 빌드
+
+```bash
+pnpm run build          # 로컬·Sites(vinext)
+pnpm run build:vercel  # Vercel(Next.js)
+```
+
+Vercel의 계획은 해당 도메인의 브라우저에만 남으며 다른 기기와 동기화되지 않습니다.
