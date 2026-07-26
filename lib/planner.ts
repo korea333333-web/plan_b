@@ -12,6 +12,7 @@ export interface PlanLike {
   end: string;
   repeat: number[] | null;
   status: PlanStatus;
+  occurrenceStatuses?: Record<string, "completed" | "incomplete">;
 }
 
 export interface AutoPlanTask {
@@ -596,15 +597,24 @@ export function hasScheduleEnded(
 }
 
 /**
- * 저장된 완료/미완료 상태는 유지하고, 시간이 지난 planned 일정만
- * unconfirmed로 판정합니다.
+ * 날짜별 완료/미완료 상태를 가장 먼저 적용합니다. 반복 일정은 날짜별
+ * 상태가 없으면 전역 상태를 퍼뜨리지 않고 planned 일정처럼 판정합니다.
  */
 export function getScheduleStatus(
-  plan: Pick<PlanLike, "date" | "end" | "status">,
+  plan: Pick<
+    PlanLike,
+    "date" | "end" | "repeat" | "status" | "occurrenceStatuses"
+  >,
   now: Date = new Date(),
   occurrenceDate: string = plan.date,
 ): PlanStatus {
-  if (plan.status !== "planned") {
+  const occurrenceStatus = plan.occurrenceStatuses?.[occurrenceDate];
+  if (occurrenceStatus) {
+    return occurrenceStatus;
+  }
+
+  const isRecurring = Boolean(plan.repeat?.length);
+  if (!isRecurring && plan.status !== "planned") {
     return plan.status;
   }
   return hasScheduleEnded(plan, now, occurrenceDate)
@@ -632,6 +642,95 @@ export function planOccursOnDate(
   }
 
   return plan.repeat.includes(getWeekday(occurrenceDate));
+}
+
+export type MaterializedPlanOccurrence<T extends PlanLike> = T & {
+  occurrenceDate: string;
+  status: PlanStatus;
+};
+
+export type AssessedPlanOccurrence<T extends PlanLike> = T & {
+  date: string;
+  occurrenceDate: string;
+  status: "completed" | "incomplete";
+};
+
+/**
+ * 요청한 날짜들에 실제로 발생하는 일정을 날짜별 상태와 함께 펼칩니다.
+ */
+export function materializePlanOccurrences<T extends PlanLike>(
+  plans: ReadonlyArray<T>,
+  dateKeys: ReadonlyArray<string>,
+  now: Date = new Date(),
+): MaterializedPlanOccurrence<T>[] {
+  const occurrences: MaterializedPlanOccurrence<T>[] = [];
+
+  for (const occurrenceDate of dateKeys) {
+    parseDateKey(occurrenceDate);
+    for (const plan of plans) {
+      if (!planOccursOnDate(plan, occurrenceDate)) {
+        continue;
+      }
+
+      occurrences.push({
+        ...plan,
+        occurrenceDate,
+        status: getScheduleStatus(plan, now, occurrenceDate),
+      });
+    }
+  }
+
+  return occurrences;
+}
+
+/**
+ * 통계에 포함할 확정 상태를 실제 발생 날짜 단위로 반환합니다.
+ */
+export function getAssessedPlanOccurrences<T extends PlanLike>(
+  plans: ReadonlyArray<T>,
+): AssessedPlanOccurrence<T>[] {
+  const occurrences: AssessedPlanOccurrence<T>[] = [];
+
+  for (const plan of plans) {
+    if (!plan.repeat?.length) {
+      if (plan.status === "completed" || plan.status === "incomplete") {
+        occurrences.push({
+          ...plan,
+          occurrenceDate: plan.date,
+          status: plan.status,
+        });
+      }
+      continue;
+    }
+
+    for (const [occurrenceDate, status] of Object.entries(
+      plan.occurrenceStatuses ?? {},
+    )) {
+      if (status !== "completed" && status !== "incomplete") {
+        continue;
+      }
+
+      try {
+        parseDateKey(occurrenceDate);
+      } catch {
+        continue;
+      }
+      if (!planOccursOnDate(plan, occurrenceDate)) {
+        continue;
+      }
+
+      occurrences.push({
+        ...plan,
+        date: occurrenceDate,
+        occurrenceDate,
+        status,
+      });
+    }
+  }
+
+  return occurrences.sort((left, right) =>
+    left.occurrenceDate.localeCompare(right.occurrenceDate),
+  );
 }
 
 /**

@@ -15,9 +15,12 @@ export const planStatuses = [
 ] as const;
 
 export const planSources = ["manual", "auto"] as const;
+export const assessedPlanStatuses = ["completed", "incomplete"] as const;
 
 export type PlanStatus = (typeof planStatuses)[number];
 export type PlanSource = (typeof planSources)[number];
+export type AssessedPlanStatus = (typeof assessedPlanStatuses)[number];
+export type OccurrenceStatuses = Record<string, AssessedPlanStatus>;
 
 export const plans = sqliteTable(
   "plans",
@@ -34,6 +37,10 @@ export const plans = sqliteTable(
     status: text("status", { enum: planStatuses })
       .notNull()
       .default("planned"),
+    occurrenceStatuses: text("occurrence_statuses", { mode: "json" })
+      .$type<OccurrenceStatuses>()
+      .notNull()
+      .default(sql`'{}'`),
     source: text("source", { enum: planSources }).notNull().default("manual"),
     createdAt: text("created_at")
       .notNull()
@@ -85,6 +92,10 @@ export const plans = sqliteTable(
     check(
       "plans_status_check",
       sql`${table.status} in ('planned', 'completed', 'incomplete', 'unconfirmed')`,
+    ),
+    check(
+      "plans_occurrence_statuses_json_check",
+      sql`json_valid(${table.occurrenceStatuses}) and json_type(${table.occurrenceStatuses}) = 'object'`,
     ),
     check(
       "plans_source_check",

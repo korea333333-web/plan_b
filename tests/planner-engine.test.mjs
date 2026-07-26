@@ -7,12 +7,14 @@ import {
   calculateCompletionRate,
   calculateCompletionStreak,
   generateAutoPlan,
+  getAssessedPlanOccurrences,
   getCharacterDialogue,
   getDateRange,
   getScheduleStatus,
   getWeekDates,
   getWeekday,
   hasScheduleEnded,
+  materializePlanOccurrences,
   planOccursOnDate,
 } from "../lib/planner.ts";
 
@@ -200,6 +202,144 @@ test("반복 일정 상태는 실제 표시 날짜의 종료 시각으로 판정
     ),
     "unconfirmed",
   );
+});
+
+test("반복 일정 완료 상태는 선택한 날짜에만 적용한다", () => {
+  const recurring = {
+    date: "2026-07-21",
+    start: "09:00",
+    end: "10:00",
+    repeat: [2, 3, 4, 5],
+    status: "completed",
+    occurrenceStatuses: {
+      "2026-07-21": "completed",
+    },
+  };
+  const wednesdayAfterEnd = new Date(2026, 6, 22, 10, 0);
+
+  assert.equal(
+    getScheduleStatus(recurring, wednesdayAfterEnd, "2026-07-21"),
+    "completed",
+  );
+  assert.equal(
+    getScheduleStatus(recurring, wednesdayAfterEnd, "2026-07-22"),
+    "unconfirmed",
+  );
+  assert.equal(
+    getScheduleStatus(recurring, wednesdayAfterEnd, "2026-07-23"),
+    "planned",
+  );
+  assert.equal(
+    getScheduleStatus(recurring, wednesdayAfterEnd, "2026-07-24"),
+    "planned",
+  );
+});
+
+test("주간 반복 일정을 발생 날짜별 독립 상태로 펼친다", () => {
+  const recurring = {
+    id: 1,
+    date: "2026-07-21",
+    start: "09:00",
+    end: "10:00",
+    repeat: [2, 3, 4, 5],
+    status: "completed",
+    occurrenceStatuses: {
+      "2026-07-21": "completed",
+    },
+  };
+  const week = [
+    "2026-07-20",
+    "2026-07-21",
+    "2026-07-22",
+    "2026-07-23",
+    "2026-07-24",
+    "2026-07-25",
+    "2026-07-26",
+  ];
+  const occurrences = materializePlanOccurrences(
+    [recurring],
+    week,
+    new Date(2026, 6, 22, 10, 0),
+  );
+
+  assert.deepEqual(
+    occurrences.map(({ occurrenceDate, status }) => ({
+      occurrenceDate,
+      status,
+    })),
+    [
+      { occurrenceDate: "2026-07-21", status: "completed" },
+      { occurrenceDate: "2026-07-22", status: "unconfirmed" },
+      { occurrenceDate: "2026-07-23", status: "planned" },
+      { occurrenceDate: "2026-07-24", status: "planned" },
+    ],
+  );
+  assert.equal(calculateCompletionRate(occurrences), 100);
+});
+
+test("통계용 반복 일정은 유효한 발생일의 확정 상태만 센다", () => {
+  const assessed = getAssessedPlanOccurrences([
+    {
+      id: 1,
+      date: "2026-07-21",
+      start: "09:00",
+      end: "10:00",
+      repeat: [2, 3, 4, 5],
+      status: "completed",
+      occurrenceStatuses: {
+        "2026-07-21": "completed",
+        "2026-07-22": "incomplete",
+        "2026-07-25": "completed",
+        invalid: "completed",
+      },
+    },
+    {
+      id: 2,
+      date: "2026-07-23",
+      start: "11:00",
+      end: "12:00",
+      repeat: [],
+      status: "completed",
+    },
+    {
+      id: 3,
+      date: "2026-07-24",
+      start: "11:00",
+      end: "12:00",
+      repeat: null,
+      status: "planned",
+    },
+  ]);
+
+  assert.deepEqual(
+    assessed.map(({ id, date, occurrenceDate, status }) => ({
+      id,
+      date,
+      occurrenceDate,
+      status,
+    })),
+    [
+      {
+        id: 1,
+        date: "2026-07-21",
+        occurrenceDate: "2026-07-21",
+        status: "completed",
+      },
+      {
+        id: 1,
+        date: "2026-07-22",
+        occurrenceDate: "2026-07-22",
+        status: "incomplete",
+      },
+      {
+        id: 2,
+        date: "2026-07-23",
+        occurrenceDate: "2026-07-23",
+        status: "completed",
+      },
+    ],
+  );
+  assert.equal(calculateCompletionRate(assessed), 67);
 });
 
 test("완료율은 확인된 일정만 대상으로 반올림한다", () => {

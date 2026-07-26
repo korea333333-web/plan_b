@@ -14,8 +14,11 @@ import {
   calculateCompletionRate,
   calculateCompletionStreak,
   generateAutoPlan,
+  getAssessedPlanOccurrences,
+  getDateRange,
   getCharacterDialogue,
   getScheduleStatus,
+  materializePlanOccurrences,
   planOccursOnDate,
   type Weekday,
 } from "../lib/planner";
@@ -24,6 +27,7 @@ type PageId = "planner" | "create" | "records";
 type PlannerView = "week" | "today";
 type TodayView = "list" | "circle";
 type PlanStatus = "planned" | "completed" | "incomplete" | "unconfirmed";
+type AssessedPlanStatus = "completed" | "incomplete";
 type PlanSource = "manual" | "auto";
 type StorageMode = "server" | "local";
 
@@ -38,9 +42,14 @@ type Plan = {
   category: string | null;
   memo: string;
   status: PlanStatus;
+  occurrenceStatuses?: Record<string, AssessedPlanStatus>;
   source: PlanSource;
   createdAt: string;
   updatedAt: string;
+};
+
+type PlanOccurrence = Plan & {
+  occurrenceDate: string;
 };
 
 type PlanDraft = Omit<Plan, "id" | "createdAt" | "updatedAt">;
@@ -123,9 +132,10 @@ function planOccursOn(plan: Plan, date: Date) {
 }
 
 function effectiveStatus(
-  plan: Plan,
+  plan: Plan | PlanOccurrence,
   now = new Date(),
-  occurrenceDate = plan.date,
+  occurrenceDate =
+    "occurrenceDate" in plan ? plan.occurrenceDate : plan.date,
 ): PlanStatus {
   return getScheduleStatus(plan, now, occurrenceDate);
 }
@@ -211,6 +221,15 @@ function isStoredPlan(value: unknown, clientId: string): value is Plan {
     ["planned", "completed", "incomplete", "unconfirmed"].includes(
       plan.status ?? "",
     ) &&
+    (plan.occurrenceStatuses === undefined ||
+      (typeof plan.occurrenceStatuses === "object" &&
+        plan.occurrenceStatuses !== null &&
+        !Array.isArray(plan.occurrenceStatuses) &&
+        Object.entries(plan.occurrenceStatuses).every(
+          ([date, status]) =>
+            /^\d{4}-\d{2}-\d{2}$/.test(date) &&
+            (status === "completed" || status === "incomplete"),
+        ))) &&
     ["manual", "auto"].includes(plan.source ?? "") &&
     typeof plan.createdAt === "string" &&
     typeof plan.updatedAt === "string"
@@ -222,9 +241,15 @@ function readLocalPlans(clientId: string): Plan[] {
     const stored = window.localStorage.getItem(localPlanStorageKey(clientId));
     if (!stored) return [];
     const parsed: unknown = JSON.parse(stored);
-    return Array.isArray(parsed)
-      ? parsed.filter((plan) => isStoredPlan(plan, clientId))
-      : [];
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .filter((plan) => isStoredPlan(plan, clientId))
+      .map((plan) => ({
+        ...plan,
+        status: plan.repeat?.length ? ("planned" as const) : plan.status,
+        occurrenceStatuses: plan.occurrenceStatuses ?? {},
+      }));
   } catch {
     return [];
   }
@@ -296,7 +321,7 @@ function WeeklyTimeline({
   dates: Date[];
   slotMinutes: 30 | 60;
   now: Date;
-  onSelect: (plan: Plan) => void;
+  onSelect: (plan: PlanOccurrence) => void;
 }) {
   const startMinute = 6 * 60;
   const endMinute = 24 * 60;
@@ -365,7 +390,7 @@ function WeeklyTimeline({
                 <button
                   className={`schedule-block ${statusClass(status)}`}
                   key={`${plan.id}-${occurrenceDate}`}
-                  onClick={() => onSelect({ ...plan, date: occurrenceDate })}
+                  onClick={() => onSelect({ ...plan, occurrenceDate })}
                   style={
                     {
                       left: `calc(${dayIndex} * (100% / 7) + 5px)`,
@@ -399,7 +424,7 @@ function WeeklyTimeline({
   );
 }
 
-function CircularDay({ plans }: { plans: Plan[] }) {
+function CircularDay({ plans }: { plans: PlanOccurrence[] }) {
   const sorted = [...plans].sort((a, b) => a.start.localeCompare(b.start));
   let cursor = 0;
   const stops: string[] = [];
@@ -433,7 +458,7 @@ function CircularDay({ plans }: { plans: Plan[] }) {
       <div className="circle-legend">
         {sorted.length ? (
           sorted.map((plan) => (
-            <div key={plan.id}>
+            <div key={`${plan.id}-${plan.occurrenceDate}`}>
               <i style={{ background: plan.category || CATEGORY_COLORS[0] }} />
               <span>{plan.title}</span>
               <b>
@@ -455,9 +480,12 @@ function TodayList({
   onStatus,
   onDelete,
 }: {
-  plans: Plan[];
+  plans: PlanOccurrence[];
   now: Date;
-  onStatus: (plan: Plan, status: "completed" | "incomplete") => void;
+  onStatus: (
+    plan: PlanOccurrence,
+    status: "completed" | "incomplete",
+  ) => void;
   onDelete: (plan: Plan) => void;
 }) {
   const sorted = [...plans].sort((a, b) => a.start.localeCompare(b.start));
@@ -467,7 +495,10 @@ function TodayList({
       {sorted.map((plan) => {
         const status = effectiveStatus(plan, now);
         return (
-          <article className="today-plan-card paper-card" key={plan.id}>
+          <article
+            className="today-plan-card paper-card"
+            key={`${plan.id}-${plan.occurrenceDate}`}
+          >
             <time>
               <strong>{plan.start}</strong>
               <span>{plan.end}</span>
@@ -489,7 +520,15 @@ function TodayList({
                 </div>
               ) : null}
             </div>
-            <button className="quiet-delete" onClick={() => onDelete(plan)} aria-label={`${plan.title} 삭제`}>
+            <button
+              className="quiet-delete"
+              onClick={() => onDelete(plan)}
+              aria-label={
+                plan.repeat?.length
+                  ? `${plan.title} 반복 계획 전체 삭제`
+                  : `${plan.title} 삭제`
+              }
+            >
               ×
             </button>
           </article>
@@ -554,7 +593,8 @@ export function PlannerApp() {
     BROWSER_ONLY_STORAGE ? "local" : "server",
   );
   const [loading, setLoading] = useState(true);
-  const [selectedPlan, setSelectedPlan] = useState<Plan | null>(null);
+  const [selectedPlan, setSelectedPlan] =
+    useState<PlanOccurrence | null>(null);
   const [reaction, setReaction] = useState<Reaction | null>(null);
   const [reactionIndex, setReactionIndex] = useState(0);
 
@@ -586,7 +626,7 @@ export function PlannerApp() {
     const todayKey = toDateKey(now);
     return plans
       .filter((plan) => planOccursOn(plan, now))
-      .map((plan) => ({ ...plan, date: todayKey }));
+      .map((plan) => ({ ...plan, occurrenceDate: todayKey }));
   }, [now, plans]);
 
   const loadPlans = useCallback(async (id: string) => {
@@ -640,6 +680,7 @@ export function PlannerApp() {
           ...draft,
           id: makeLocalPlanId(),
           clientId,
+          occurrenceStatuses: draft.occurrenceStatuses ?? {},
           createdAt: now,
           updatedAt: now,
         };
@@ -667,13 +708,23 @@ export function PlannerApp() {
   );
 
   const changeStatus = useCallback(
-    async (plan: Plan, status: "completed" | "incomplete") => {
+    async (
+      plan: PlanOccurrence,
+      status: "completed" | "incomplete",
+    ) => {
       const updateInBrowser = () => {
         const storedPlan =
           plansRef.current.find((item) => item.id === plan.id) ?? plan;
+        const isRecurring = Boolean(storedPlan.repeat?.length);
         const updatedPlan: Plan = {
           ...storedPlan,
-          status,
+          status: isRecurring ? "planned" : status,
+          occurrenceStatuses: isRecurring
+            ? {
+                ...(storedPlan.occurrenceStatuses ?? {}),
+                [plan.occurrenceDate]: status,
+              }
+            : storedPlan.occurrenceStatuses,
           updatedAt: new Date().toISOString(),
         };
         replaceWithLocalPlans(
@@ -693,7 +744,16 @@ export function PlannerApp() {
           const response = await fetch("/api/plans", {
             method: "PATCH",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ clientId, id: plan.id, status }),
+            body: JSON.stringify(
+              plan.repeat?.length
+                ? {
+                    clientId,
+                    id: plan.id,
+                    occurrenceDate: plan.occurrenceDate,
+                    occurrenceStatus: status,
+                  }
+                : { clientId, id: plan.id, status },
+            ),
           });
           const payload = await readJson<{ plan: Plan }>(response);
           updatedPlan = payload.plan;
@@ -709,8 +769,12 @@ export function PlannerApp() {
       }
 
       setSelectedPlan((current) =>
-        current?.id === plan.id
-          ? { ...updatedPlan, date: current.date }
+        current?.id === plan.id &&
+        current.occurrenceDate === plan.occurrenceDate
+          ? {
+              ...updatedPlan,
+              occurrenceDate: current.occurrenceDate,
+            }
           : current,
       );
       const dialogue = getCharacterDialogue(status, reactionIndex);
@@ -758,21 +822,41 @@ export function PlannerApp() {
     [clientId, replacePlans, replaceWithLocalPlans],
   );
 
-  const unconfirmedCount = plans.filter((plan) => effectiveStatus(plan, now) === "unconfirmed").length;
-  const completedPlans = plans.filter((plan) => plan.status === "completed");
-  const decidedPlans = plans.filter(
-    (plan) => plan.status === "completed" || plan.status === "incomplete",
+  const decidedPlans = getAssessedPlanOccurrences(plans);
+  const completedPlans = decidedPlans.filter(
+    (plan) => plan.status === "completed",
   );
-  const completionRate = calculateCompletionRate(plans);
+  const completionRate = calculateCompletionRate(decidedPlans);
   const currentWeekDates = getWeekDates(now);
-  const currentWeekPlans = plans.filter((plan) =>
-    currentWeekDates.some((date) => planOccursOn(plan, date)),
+  const currentWeekOccurrences = materializePlanOccurrences(
+    plans,
+    currentWeekDates.map(toDateKey),
+    now,
   );
-  const weekCompletionRate = calculateCompletionRate(currentWeekPlans);
-  const incompleteCount = plans.filter((plan) => plan.status === "incomplete").length;
+  const weekCompletionRate = calculateCompletionRate(currentWeekOccurrences);
+  const incompleteCount = decidedPlans.filter(
+    (plan) => plan.status === "incomplete",
+  ).length;
+  const todayKey = toDateKey(now);
+  const earliestHistoryDate = plans.reduce(
+    (earliest, plan) => (plan.date < earliest ? plan.date : earliest),
+    todayKey,
+  );
+  const historyStart = [
+    earliestHistoryDate,
+    toDateKey(addDays(now, -365)),
+  ].sort().at(-1) ?? todayKey;
+  const historyOccurrences = materializePlanOccurrences(
+    plans,
+    getDateRange(historyStart, todayKey),
+    now,
+  );
+  const unconfirmedCount = historyOccurrences.filter(
+    (plan) => plan.status === "unconfirmed",
+  ).length;
   const streak = calculateCompletionStreak(
-    plans.map((plan) => ({ ...plan, status: effectiveStatus(plan, now) })),
-    toDateKey(now),
+    historyOccurrences,
+    todayKey,
   );
 
   return (
@@ -955,7 +1039,14 @@ export function PlannerApp() {
                   <span className="eyebrow">오늘의 흐름</span>
                   <strong>{todayPlans.length}개의 계획</strong>
                   <div>
-                    <b>{todayPlans.filter((plan) => plan.status === "completed").length}</b>
+                    <b>
+                      {
+                        todayPlans.filter(
+                          (plan) =>
+                            effectiveStatus(plan, now) === "completed",
+                        ).length
+                      }
+                    </b>
                     <span>완료</span>
                   </div>
                   <div>
@@ -1029,17 +1120,21 @@ export function PlannerApp() {
                       <h2>수련 발자국</h2>
                     </div>
                     <ul>
-                      {[...plans]
-                        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+                      {[...decidedPlans]
+                        .sort(
+                          (a, b) =>
+                            b.occurrenceDate.localeCompare(a.occurrenceDate) ||
+                            b.updatedAt.localeCompare(a.updatedAt),
+                        )
                         .slice(0, 6)
                         .map((plan) => {
                           const status = effectiveStatus(plan, now);
                           return (
-                            <li key={plan.id}>
+                            <li key={`${plan.id}-${plan.occurrenceDate}`}>
                               <i style={{ background: plan.category || CATEGORY_COLORS[0] }} />
                               <div>
                                 <strong>{plan.title}</strong>
-                                <span>{plan.date} · {plan.start}</span>
+                                <span>{plan.occurrenceDate} · {plan.start}</span>
                               </div>
                               <b className={statusClass(status)}>{statusLabel(status)}</b>
                             </li>
@@ -1076,7 +1171,7 @@ export function PlannerApp() {
             <dl>
               <div>
                 <dt>날짜</dt>
-                <dd>{selectedPlan.date}</dd>
+                <dd>{selectedPlan.occurrenceDate}</dd>
               </div>
               <div>
                 <dt>시간</dt>
@@ -1095,7 +1190,9 @@ export function PlannerApp() {
               </div>
             ) : null}
             <button className="sheet-delete" onClick={() => void deletePlan(selectedPlan)}>
-              이 계획 삭제
+              {selectedPlan.repeat?.length
+                ? "반복 계획 전체 삭제"
+                : "이 계획 삭제"}
             </button>
           </section>
         </div>

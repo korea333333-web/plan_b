@@ -35,6 +35,7 @@ db/
   index.ts                 # D1 Drizzle 연결
 drizzle/
   0000_empty_the_captain.sql
+  0001_lively_lilith.sql    # 반복 회차별 상태 열 추가
 tests/
   planner-engine.test.mjs
   rendered-html.test.mjs
@@ -57,7 +58,7 @@ React에만 저장되어 새로고침 시 초기화되는 값:
 브라우저 `localStorage`에 저장되는 값:
 
 - `maewha-client-id`
-- Vercel 환경에서는 계획 데이터
+- Vercel 환경에서는 계획 데이터와 반복 계획의 날짜별 `occurrenceStatuses`
 
 `clientId`는 첫 접속에 `crypto.randomUUID()`로 생성된다. 로그인 토큰이 아니며 사용자 신원을 증명하지 않는다. 로컬·Sites에서는 같은 브라우저 프로필의 D1 행을 다시 찾기 위한 키다. Vercel에서는 계획 자체가 같은 origin의 `localStorage`에만 남는다.
 
@@ -82,7 +83,8 @@ React에만 저장되어 새로고침 시 초기화되는 값:
 | `repeat` | 요일 번호 JSON 배열 또는 null |
 | `category` | 현재 UI에서는 색상 문자열 |
 | `memo` | 선택 메모 |
-| `status` | planned/completed/incomplete/unconfirmed |
+| `status` | 비반복 계획의 planned/completed/incomplete/unconfirmed. 반복 계획은 planned 유지 |
+| `occurrence_statuses` | 반복 계획의 발생 날짜별 completed/incomplete JSON 객체 |
 | `source` | manual/auto |
 | `created_at`, `updated_at` | ISO 문자열 또는 DB 기본 시각 |
 
@@ -99,10 +101,10 @@ React에만 저장되어 새로고침 시 초기화되는 값:
 
 - `GET ?clientId=`: 해당 ID의 전체 계획을 날짜·시간순으로 조회
 - `POST`: 계획 한 건 생성
-- `PATCH`: 소유 `clientId`와 행 ID가 일치하는 계획 변경
-- `DELETE ?clientId=&id=`: 계획 한 건 삭제
+- `PATCH`: 소유 `clientId`와 행 ID가 일치하는 계획 변경. 반복 계획 판정은 발생 날짜와 `occurrenceStatus`를 함께 받음
+- `DELETE ?clientId=&id=`: 계획 한 행 삭제. 반복 계획이면 모든 회차가 함께 삭제됨
 
-UI가 현재 사용하는 PATCH는 완료·미완료 상태 변경뿐이다. 일정 내용 편집 UI는 없다.
+UI가 현재 사용하는 PATCH는 완료·미완료 상태 변경뿐이다. 비반복 계획은 `status`, 반복 계획은 `occurrenceStatuses[발생 날짜]`를 변경한다. 일정 내용 편집 UI는 없다.
 
 D1 오류와 검증 오류는 JSON `{ error }`로 반환한다. 테이블이 준비되지 않은 경우 503 안내를 반환한다.
 
@@ -136,7 +138,7 @@ D1 API가 네트워크 오류, 404 또는 5xx를 반환하면 UI는 현재 브�
 - UI의 오늘, 현재 시각, 종료 판정은 브라우저의 로컬 `Date`를 사용한다.
 - 고정 `Asia/Seoul` 변환이나 UTC epoch 저장은 없다.
 
-반복 일정은 별도 회차 행을 만들지 않는다. 기준 날짜 이후 `repeat`에 포함된 요일이면 같은 계획 행을 화면에 다시 그린다. 상태도 같은 행 하나에 저장되므로 반복 회차마다 독립적으로 완료 처리할 수 없다.
+반복 일정은 별도 회차 행을 만들지 않는다. 기준 날짜 이후 `repeat`에 포함된 요일이면 같은 계획 행을 화면에 다시 그린다. 완료·미완료 판정은 같은 행의 `occurrenceStatuses` JSON 객체에 `YYYY-MM-DD` 키로 저장하므로 날짜별 회차가 독립적이다. 비반복 일정은 기존 `status` 열을 사용한다.
 
 ## 8. 상태와 대사
 
@@ -147,7 +149,7 @@ planned -- 종료 시각 경과(화면 계산) --> unconfirmed
 planned/unconfirmed -- 사용자 선택 --> completed 또는 incomplete
 ```
 
-`planned` 행은 시간이 지나도 D1에서 자동 변경되지 않는다. `effectiveStatus()`가 화면에서만 미확인으로 바꿔 해석한다.
+`planned` 행은 시간이 지나도 D1에서 자동 변경되지 않는다. `effectiveStatus()`가 발생 날짜의 `occurrenceStatuses`를 먼저 확인하고, 미판정 회차는 화면에서만 종료 시각에 따라 예정 또는 미확인으로 해석한다. 비반복 계획은 행의 `status`를 사용한다.
 
 판정 성공 후 `reactionIndex`로 인물을 고르고 토스트를 5.2초 표시한다. 순번과 인물은 행에 저장하지 않는다. 새로고침하면 순번은 0으로 돌아간다. 현재 UI는 완료·미완료 상태의 정정을 제공하지 않는다.
 
@@ -170,12 +172,14 @@ planned/unconfirmed -- 사용자 선택 --> completed 또는 incomplete
 
 ## 10. 기록 계산
 
-- `calculateCompletionRate`: completed / (completed + incomplete), 반올림
-- `calculateCompletionStreak`: 계획이 있는 날짜만 보고 모두 완료된 날짜를 역순으로 계산
+- 완료율과 미완료 개수, 최근 기록은 비반복 계획의 판정 상태와 반복 계획의 `occurrenceStatuses`를 발생 회차 목록으로 펼쳐 계산
+- `calculateCompletionRate`: 발생 회차의 completed / (completed + incomplete), 반올림
+- 미확인 개수와 `calculateCompletionStreak`는 가장 이른 기준 날짜와 오늘 중 최대 최근 365일 범위의 발생 회차를 만들어 계산
+- `calculateCompletionStreak`: 이 범위에서 계획이 있는 날짜만 보고 모두 완료된 날짜를 역순으로 계산
 - 오늘에 planned만 있으면 오늘은 건너뜀
 - incomplete 또는 effective unconfirmed 날짜에서 중단
 
-UI는 전체 로드된 행을 함수에 넘긴다. 주간·월간 필터가 없으며 매화 개화도 같은 전체 완료율을 사용한다.
+이번 주 매화 개화율은 현재 주에 발생하는 회차의 완료율을 사용한다. 사용자 지정 주간·월간 기간 필터는 없다.
 
 ## 11. 빌드와 배포 설정
 
@@ -191,6 +195,8 @@ UI는 전체 로드된 행을 함수에 넘긴다. 주간·월간 필터가 없�
 2. `pnpm run db:generate`
 3. 생성 migration 검토
 4. 로컬과 Sites D1에 적용
+
+`0001_lively_lilith.sql`은 `occurrence_statuses`를 빈 JSON 객체로 추가한다. 이 migration은 기존 반복행의 전역 `status`를 `planned`로 초기화하고 기존 판정값을 날짜별 회차로 추정해 옮기지 않는다. 비반복행은 기존 `status`를 유지한다.
 
 로컬·Sites는 D1을 우선 사용한다. D1 API 장애 때만 안내와 함께 브라우저 저장으로 폴백한다.
 

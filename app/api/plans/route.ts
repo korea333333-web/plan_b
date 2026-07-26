@@ -1,13 +1,16 @@
-import { and, asc, eq, gte, lte } from "drizzle-orm";
+import { and, asc, eq, gte, lte, sql } from "drizzle-orm";
 import { getDb } from "../../../db";
 import {
+  assessedPlanStatuses,
   plans,
   planSources,
   planStatuses,
+  type AssessedPlanStatus,
   type NewPlan,
   type PlanSource,
   type PlanStatus,
 } from "../../../db/schema";
+import { planOccursOnDate } from "../../../lib/planner";
 
 const CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -164,6 +167,19 @@ function readRepeat(value: unknown, fallback: number[] | null): number[] | null 
   }
 
   return [...new Set(value as number[])].sort((a, b) => a - b);
+}
+
+function readAssessedStatus(value: unknown): AssessedPlanStatus {
+  if (
+    typeof value !== "string" ||
+    !assessedPlanStatuses.includes(value as AssessedPlanStatus)
+  ) {
+    throw new RequestValidationError(
+      "occurrenceStatus는 completed 또는 incomplete여야 합니다.",
+    );
+  }
+
+  return value as AssessedPlanStatus;
 }
 
 function readEnum<T extends string>(
@@ -346,6 +362,7 @@ export async function PATCH(request: Request) {
       "category",
       "memo",
       "status",
+      "occurrenceStatus",
       "source",
     ];
 
@@ -365,9 +382,51 @@ export async function PATCH(request: Request) {
     }
 
     const input = validatePlanInput(payload, toValidPlanInput(existing));
+    const updatedAt = new Date().toISOString();
+
+    if (existing.repeat?.length) {
+      if (payload.status !== undefined) {
+        throw new RequestValidationError(
+          "반복 계획은 occurrenceStatus로 회차 상태를 변경해야 합니다.",
+        );
+      }
+
+      if (payload.occurrenceStatus !== undefined) {
+        const occurrenceDate = readDate(payload.occurrenceDate, "발생 날짜");
+        if (!planOccursOnDate(existing, occurrenceDate)) {
+          throw new RequestValidationError(
+            "선택한 날짜에는 이 반복 계획이 없습니다.",
+          );
+        }
+
+        const occurrenceStatus = readAssessedStatus(payload.occurrenceStatus);
+        const occurrencePath = `$."${occurrenceDate}"`;
+        const [plan] = await db
+          .update(plans)
+          .set({
+            ...input,
+            status: "planned",
+            occurrenceStatuses: sql`json_set(coalesce(${plans.occurrenceStatuses}, '{}'), ${occurrencePath}, ${occurrenceStatus})`,
+            updatedAt,
+          })
+          .where(and(eq(plans.id, id), eq(plans.clientId, clientId)))
+          .returning();
+
+        return Response.json({ plan });
+      }
+    } else if (payload.occurrenceStatus !== undefined) {
+      throw new RequestValidationError(
+        "반복하지 않는 계획은 status로 상태를 변경해야 합니다.",
+      );
+    }
+
     const [plan] = await db
       .update(plans)
-      .set({ ...input, updatedAt: new Date().toISOString() })
+      .set({
+        ...input,
+        ...(existing.repeat?.length ? { status: "planned" as const } : {}),
+        updatedAt,
+      })
       .where(and(eq(plans.id, id), eq(plans.clientId, clientId)))
       .returning();
 
