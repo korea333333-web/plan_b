@@ -64,3 +64,20 @@ test("빈 상태와 확정 대사를 코드의 단일 기준과 일치시킨다"
   assert.match(engine, /뭐야, 왜 안 왔어\?/);
   assert.match(engine, /도망친다고 될 일이 아니다\. 다음에는 꼭 하거라\./);
 });
+
+test("모바일 CTA와 기록 안내의 회귀를 막는다", async () => {
+  const [app, styles] = await Promise.all([
+    readFile(new URL("../app/PlannerApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(
+    styles,
+    /\.empty-branch\s*\{[^}]*pointer-events:\s*none;/s,
+  );
+  assert.match(app, /const navigateToPage = useCallback/);
+  assert.match(app, /window\.requestAnimationFrame\(\(\) => window\.scrollTo/);
+  assert.match(app, /자동으로 쌓이는 실행 기록/);
+  assert.match(app, /기록이 쌓이는 방법/);
+  assert.match(app, /최근에 결과를 남긴 계획/);
+});

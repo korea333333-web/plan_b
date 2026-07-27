@@ -435,7 +435,13 @@ select:focus-visible {
   width: 250px;
   height: 190px;
   opacity: 0.11;
+  pointer-events: none;
   transform: rotate(-12deg);
+}
+
+.empty-planner > :not(.empty-branch) {
+  position: relative;
+  z-index: 1;
 }
 
 .empty-branch::before {
@@ -1435,29 +1441,119 @@ select:focus-visible {
   margin-bottom: 20px;
 }
 
-.record-grid {
+.records-guide {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
-  margin-bottom: 18px;
+  grid-template-columns: 92px minmax(0, 650px);
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  min-height: 330px;
+  padding: 42px;
 }
 
-.stat-card {
-  padding: 20px;
+.records-guide > i {
+  display: grid;
+  width: 82px;
+  height: 82px;
+  place-items: center;
+  border: 1px solid rgba(173, 52, 75, 0.28);
+  border-radius: 50%;
+  background: rgba(173, 52, 75, 0.07);
+  color: var(--maewha);
+  font-family: "Noto Serif KR", "Batang", serif;
+  font-size: 31px;
+  font-style: normal;
 }
 
-.stat-card > span,
-.stat-card > small {
+.records-guide h2 {
+  margin: 6px 0 8px;
+  font-family: "Noto Serif KR", "Batang", serif;
+  font-size: clamp(24px, 3vw, 34px);
+}
+
+.records-guide p {
+  max-width: 620px;
+  margin: 0 0 22px;
   color: var(--ink-soft);
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.record-summary {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.72fr) minmax(0, 1.28fr);
+  gap: 28px;
+  margin-bottom: 18px;
+  padding: 28px;
+}
+
+.record-summary-rate {
+  padding-right: 28px;
+  border-right: 1px solid var(--line);
+}
+
+.record-summary-rate h2 {
+  margin: 6px 0 0;
+  font-family: "Noto Serif KR", "Batang", serif;
+  font-size: 23px;
+}
+
+.record-summary-rate > strong {
+  display: block;
+  margin: 12px 0 7px;
+  color: var(--maewha);
+  font-family: Georgia, "Batang", serif;
+  font-size: 52px;
+  line-height: 1;
+}
+
+.record-summary-rate p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.record-summary-rate p small {
+  display: block;
   font-size: 10px;
 }
 
-.stat-card > strong {
-  display: block;
-  margin: 10px 0 5px;
-  color: var(--maewha);
+.record-summary dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.record-summary dl div {
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 253, 251, 0.58);
+}
+
+.record-summary dt {
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.record-summary dd {
+  margin: 7px 0 5px;
+  color: var(--ink);
   font-family: Georgia, "Batang", serif;
-  font-size: 38px;
+  font-size: 29px;
+  font-weight: 700;
+}
+
+.record-summary dl small {
+  color: var(--ink-soft);
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .record-detail-grid {
@@ -1767,10 +1863,6 @@ select:focus-visible {
     padding-left: 22px;
   }
 
-  .record-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
   .today-layout {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1905,6 +1997,17 @@ select:focus-visible {
     grid-template-columns: 1fr;
   }
 
+  .record-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .record-summary-rate {
+    padding-right: 0;
+    padding-bottom: 22px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
   .reaction-toast {
     right: 16px;
     bottom: 92px;
@@ -2036,17 +2139,41 @@ select:focus-visible {
     grid-template-columns: minmax(0, 1fr) 66px 18px 26px;
   }
 
-  .record-grid {
-    grid-template-columns: 1fr 1fr;
-    gap: 9px;
+  .records-guide {
+    grid-template-columns: 1fr;
+    gap: 18px;
+    min-height: 360px;
+    padding: 30px 20px;
+    text-align: center;
   }
 
-  .stat-card {
-    padding: 16px;
+  .records-guide > i {
+    margin: 0 auto;
   }
 
-  .stat-card > strong {
-    font-size: 31px;
+  .record-summary {
+    gap: 18px;
+    padding: 20px 16px;
+  }
+
+  .record-summary-rate > strong {
+    font-size: 46px;
+  }
+
+  .record-summary dl {
+    gap: 6px;
+  }
+
+  .record-summary dl div {
+    padding: 12px 7px;
+  }
+
+  .record-summary dd {
+    font-size: 24px;
+  }
+
+  .record-summary dl small {
+    font-size: 8px;
   }
 
   .record-detail-grid {
@@ -2059,7 +2186,7 @@ select:focus-visible {
   }
 
   .plum-progress {
-    min-height: 300px;
+    min-height: 230px;
   }
 
   .plan-sheet {

@@ -60,7 +60,16 @@ React에만 저장되어 새로고침 시 초기화되는 값:
 - `maewha-client-id`
 - Vercel 환경에서는 계획 데이터와 반복 계획의 날짜별 `occurrenceStatuses`
 
-`clientId`는 첫 접속에 `crypto.randomUUID()`로 생성된다. 로그인 토큰이 아니며 사용자 신원을 증명하지 않는다. 로컬·Sites에서는 같은 브라우저 프로필의 D1 행을 다시 찾기 위한 키다. Vercel에서는 계획 자체가 같은 origin의 `localStorage`에만 남는다.
+`clientId`는 첫 접속에 `crypto.randomUUID()`로 생성하고, 이를 지원하지 않는
+모바일 브라우저에서는 `getRandomValues()` 또는 임시 난수 문자열로 대체한다.
+브라우저 저장소를 쓸 수 없는 세션에서도 메모리에 같은 값을 유지해 React
+snapshot이 계속 바뀌지 않게 한다. 이 값은 로그인 토큰이 아니며 사용자 신원을
+증명하지 않는다. 로컬·Sites에서는 같은 브라우저 프로필의 D1 행을 다시 찾기
+위한 키다. Vercel에서는 계획 자체가 같은 origin의 `localStorage`에만 남는다.
+
+제품 탭 전환은 `navigateToPage()`가 맡는다. 화면을 바꾼 뒤 문서 스크롤을
+맨 위로 돌려, 긴 모바일 화면에서 이전 탭의 스크롤 위치가 새 탭에 남지 않게
+한다.
 
 따라서 현재 구현은 다음을 보장하지 않는다.
 

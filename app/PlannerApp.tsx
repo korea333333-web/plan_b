@@ -80,6 +80,33 @@ const CHARACTER_NAMES = ["청명", "백천", "유이설", "조걸", "윤종"] as
 const LOCAL_PLAN_STORAGE_PREFIX = "maewha-plans:";
 const BROWSER_ONLY_STORAGE =
   process.env.NEXT_PUBLIC_PLAN_STORAGE_MODE === "local";
+let memoryClientId = "";
+
+function makeBrowserId() {
+  const browserCrypto =
+    typeof globalThis.crypto === "undefined" ? null : globalThis.crypto;
+  if (browserCrypto && typeof browserCrypto.randomUUID === "function") {
+    return browserCrypto.randomUUID();
+  }
+
+  if (browserCrypto && typeof browserCrypto.getRandomValues === "function") {
+    const bytes = browserCrypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+    return [
+      hex.slice(0, 8),
+      hex.slice(8, 12),
+      hex.slice(12, 16),
+      hex.slice(16, 20),
+      hex.slice(20),
+    ].join("-");
+  }
+
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
 
 function pad(value: number) {
   return String(value).padStart(2, "0");
@@ -156,17 +183,23 @@ function statusClass(status: PlanStatus) {
 
 function getOrCreateClientId() {
   const storageKey = "maewha-client-id";
-  const created = crypto.randomUUID();
+  if (memoryClientId) return memoryClientId;
 
   try {
     const existing = window.localStorage.getItem(storageKey);
-    if (existing) return existing;
+    if (existing) {
+      memoryClientId = existing;
+      return memoryClientId;
+    }
+    const created = makeBrowserId();
     window.localStorage.setItem(storageKey, created);
+    memoryClientId = created;
   } catch {
     // Private browsing or a locked-down browser may not expose localStorage.
+    memoryClientId = makeBrowserId();
   }
 
-  return created;
+  return memoryClientId;
 }
 
 class ApiRequestError extends Error {
@@ -267,7 +300,12 @@ function writeLocalPlans(clientId: string, plansToStore: Plan[]) {
 }
 
 function makeLocalPlanId() {
-  const random = crypto.getRandomValues(new Uint16Array(1))[0];
+  const browserCrypto =
+    typeof globalThis.crypto === "undefined" ? null : globalThis.crypto;
+  const random =
+    browserCrypto && typeof browserCrypto.getRandomValues === "function"
+      ? browserCrypto.getRandomValues(new Uint16Array(1))[0]
+      : Math.floor(Math.random() * 65_536);
   return -(Date.now() * 1_000 + random);
 }
 
@@ -303,7 +341,7 @@ function EmptyPlanner({ onCreate }: { onCreate: () => void }) {
       <span className="eyebrow">첫 매화를 피울 시간</span>
       <h2>아직 계획이 없습니다.</h2>
       <p>오늘의 할 일을 직접 적거나, 목표를 넣어 한 주 계획을 만들어보세요.</p>
-      <button className="seal-button" onClick={onCreate}>
+      <button className="seal-button" type="button" onClick={onCreate}>
         계획 만들기
       </button>
     </section>
@@ -555,10 +593,10 @@ function UnconfirmedCallout({ count }: { count: number }) {
   );
 }
 
-function PlumProgress({ rate }: { rate: number }) {
+function PlumProgress({ rate, label }: { rate: number; label: string }) {
   const active = Math.round(rate / 10);
   return (
-    <div className="plum-progress" aria-label={`매화 개화율 ${rate}%`}>
+    <div className="plum-progress" aria-label={label}>
       <div className="plum-branch branch-main" />
       <div className="plum-branch branch-a" />
       <div className="plum-branch branch-b" />
@@ -567,7 +605,7 @@ function PlumProgress({ rate }: { rate: number }) {
           <b />
         </i>
       ))}
-      <span>이번 주 매화가 {rate}% 피었습니다.</span>
+      <span>{label}</span>
     </div>
   );
 }
@@ -597,6 +635,12 @@ export function PlannerApp() {
     useState<PlanOccurrence | null>(null);
   const [reaction, setReaction] = useState<Reaction | null>(null);
   const [reactionIndex, setReactionIndex] = useState(0);
+
+  const navigateToPage = useCallback((nextPage: PageId) => {
+    setSelectedPlan(null);
+    setPage(nextPage);
+    window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
+  }, []);
 
   const replacePlans = useCallback((nextPlans: Plan[]) => {
     plansRef.current = nextPlans;
@@ -833,7 +877,11 @@ export function PlannerApp() {
     currentWeekDates.map(toDateKey),
     now,
   );
-  const weekCompletionRate = calculateCompletionRate(currentWeekOccurrences);
+  const currentWeekAssessed = currentWeekOccurrences.filter(
+    (plan) =>
+      plan.status === "completed" || plan.status === "incomplete",
+  );
+  const weekCompletionRate = calculateCompletionRate(currentWeekAssessed);
   const incompleteCount = decidedPlans.filter(
     (plan) => plan.status === "incomplete",
   ).length;
@@ -842,10 +890,11 @@ export function PlannerApp() {
     (earliest, plan) => (plan.date < earliest ? plan.date : earliest),
     todayKey,
   );
-  const historyStart = [
-    earliestHistoryDate,
-    toDateKey(addDays(now, -365)),
-  ].sort().at(-1) ?? todayKey;
+  const historyBoundary = toDateKey(addDays(now, -365));
+  const historyStart =
+    earliestHistoryDate > historyBoundary
+      ? earliestHistoryDate
+      : historyBoundary;
   const historyOccurrences = materializePlanOccurrences(
     plans,
     getDateRange(historyStart, todayKey),
@@ -879,7 +928,8 @@ export function PlannerApp() {
             <button
               className={page === item.id ? "is-active" : ""}
               key={item.id}
-              onClick={() => setPage(item.id)}
+              aria-current={page === item.id ? "page" : undefined}
+              onClick={() => navigateToPage(item.id)}
             >
               <i>{item.icon}</i>
               <span>{item.label}</span>
@@ -937,7 +987,7 @@ export function PlannerApp() {
             {loading ? (
               <div className="loading-paper paper-card">계획표를 펼치는 중…</div>
             ) : plans.length === 0 ? (
-              <EmptyPlanner onCreate={() => setPage("create")} />
+              <EmptyPlanner onCreate={() => navigateToPage("create")} />
             ) : plannerView === "week" ? (
               <div className="planner-panel paper-card">
                 <div className="planner-toolbar">
@@ -984,7 +1034,7 @@ export function PlannerApp() {
                 ) : (
                   <div className="week-empty">
                     <strong>이번 주에는 아직 계획이 없습니다.</strong>
-                    <button onClick={() => setPage("create")}>계획 만들기</button>
+                    <button onClick={() => navigateToPage("create")}>계획 만들기</button>
                   </div>
                 )}
               </div>
@@ -1032,7 +1082,7 @@ export function PlannerApp() {
                       </section>
                     )
                   ) : (
-                    <EmptyPlanner onCreate={() => setPage("create")} />
+                    <EmptyPlanner onCreate={() => navigateToPage("create")} />
                   )}
                 </div>
                 <aside className="today-summary paper-card">
@@ -1064,9 +1114,9 @@ export function PlannerApp() {
             clientReady={Boolean(clientId)}
             onCreate={createPlan}
             onFinished={() => {
-              setPage("planner");
               setPlannerView("week");
               setAnchorDate(new Date());
+              navigateToPage("planner");
             }}
           />
         ) : null}
@@ -1075,49 +1125,71 @@ export function PlannerApp() {
           <section className="page-section records-page">
             <header className="page-heading">
               <div>
-                <span className="eyebrow">쌓인 발자국</span>
+                <span className="eyebrow">자동으로 쌓이는 실행 기록</span>
                 <h1>수련 기록</h1>
-                <p>결과를 탓하기보다, 다시 이어갈 자리를 확인하세요.</p>
+                <p>계획에서 ‘완료했어’ 또는 ‘못 했어’를 선택하면 여기에 자동으로 기록돼요.</p>
               </div>
             </header>
             {plans.length === 0 ? (
-              <EmptyPlanner onCreate={() => setPage("create")} />
+              <EmptyPlanner onCreate={() => navigateToPage("create")} />
+            ) : decidedPlans.length === 0 ? (
+              <article className="paper-card records-guide">
+                <i aria-hidden="true">錄</i>
+                <div>
+                  <span className="eyebrow">기록이 쌓이는 방법</span>
+                  <h2>
+                    {unconfirmedCount > 0
+                      ? `결과를 기다리는 계획이 ${unconfirmedCount}개 있어요.`
+                      : "아직 남겨진 결과가 없어요."}
+                  </h2>
+                  <p>
+                    계획 시간이 지난 뒤 내 계획표에서 ‘완료했어’ 또는 ‘못 했어’를
+                    선택하세요. 선택한 결과가 이곳에 차곡차곡 쌓여요.
+                  </p>
+                  <button
+                    className="seal-button"
+                    type="button"
+                    onClick={() => navigateToPage("planner")}
+                  >
+                    내 계획표 보기
+                  </button>
+                </div>
+              </article>
             ) : (
               <>
-                <div className="record-grid">
-                  <article className="paper-card stat-card">
-                    <span>전체 완료율</span>
+                <article className="paper-card record-summary">
+                  <div className="record-summary-rate">
+                    <span className="eyebrow">한눈에 보기</span>
+                    <h2>확인한 계획 완료율</h2>
                     <strong>{completionRate}%</strong>
-                    <small>{decidedPlans.length}개 중 {completedPlans.length}개 완료</small>
-                  </article>
-                  <article className="paper-card stat-card">
-                    <span>연속 달성</span>
-                    <strong>{streak}일</strong>
-                    <small>오늘까지 이어진 기록</small>
-                  </article>
-                  <article className="paper-card stat-card">
-                    <span>확인이 필요해요</span>
-                    <strong>{unconfirmedCount}개</strong>
-                    <small>놓치지 말고 결과를 남겨주세요</small>
-                  </article>
-                  <article className="paper-card stat-card">
-                    <span>다시 도전할 계획</span>
-                    <strong>{incompleteCount}개</strong>
-                    <small>실패가 아니라 다음 수련의 단서</small>
-                  </article>
-                </div>
-                <div className="record-detail-grid">
-                  <article className="paper-card blossom-card">
+                    <p>
+                      결과를 남긴 {decidedPlans.length}회 중 {completedPlans.length}회 완료
+                      <small>예정과 미확인은 완료율에서 제외해요.</small>
+                    </p>
+                  </div>
+                  <dl>
                     <div>
-                      <span className="eyebrow">이번 주 개화</span>
-                      <h2>꾸준함이 매화를 피웁니다</h2>
+                      <dt>연속 완료</dt>
+                      <dd>{streak}일</dd>
+                      <small>계획이 있던 날을 모두 완료</small>
                     </div>
-                    <PlumProgress rate={weekCompletionRate} />
-                  </article>
+                    <div>
+                      <dt>확인 대기</dt>
+                      <dd>{unconfirmedCount}개</dd>
+                      <small>시간이 지났지만 결과가 없음</small>
+                    </div>
+                    <div>
+                      <dt>미완료</dt>
+                      <dd>{incompleteCount}개</dd>
+                      <small>‘못 했어’로 남긴 계획</small>
+                    </div>
+                  </dl>
+                </article>
+                <div className="record-detail-grid">
                   <article className="paper-card recent-records">
                     <div>
-                      <span className="eyebrow">최근 기록</span>
-                      <h2>수련 발자국</h2>
+                      <span className="eyebrow">최근 확인</span>
+                      <h2>최근에 결과를 남긴 계획</h2>
                     </div>
                     <ul>
                       {[...decidedPlans]
@@ -1142,6 +1214,24 @@ export function PlannerApp() {
                         })}
                     </ul>
                   </article>
+                  <article className="paper-card blossom-card">
+                    <div>
+                      <span className="eyebrow">이번 주 완료율</span>
+                      <h2>
+                        {currentWeekAssessed.length > 0
+                          ? "완료할수록 매화가 피어요"
+                          : "이번 주에 확인한 계획이 아직 없어요"}
+                      </h2>
+                    </div>
+                    <PlumProgress
+                      rate={weekCompletionRate}
+                      label={
+                        currentWeekAssessed.length > 0
+                          ? `이번 주 확인한 계획 중 ${weekCompletionRate}% 완료`
+                          : "계획의 결과를 남기면 매화가 피어나요."
+                      }
+                    />
+                  </article>
                 </div>
               </>
             )}
@@ -1154,7 +1244,8 @@ export function PlannerApp() {
           <button
             className={page === item.id ? "is-active" : ""}
             key={item.id}
-            onClick={() => setPage(item.id)}
+            aria-current={page === item.id ? "page" : undefined}
+            onClick={() => navigateToPage(item.id)}
           >
             <i>{item.icon}</i>
             <span>{item.label}</span>
@@ -1235,7 +1326,7 @@ function CreatePlanPage({
   const [memo, setMemo] = useState("");
 
   const [tasks, setTasks] = useState<AutoTask[]>([
-    { id: crypto.randomUUID(), title: "", minutes: 60 },
+    { id: makeBrowserId(), title: "", minutes: 60 },
   ]);
   const [autoStartDate, setAutoStartDate] = useState(todayKey);
   const [autoEndDate, setAutoEndDate] = useState(toDateKey(addDays(new Date(), 7)));
@@ -1532,7 +1623,7 @@ function CreatePlanPage({
                 onClick={() =>
                   setTasks((current) => [
                     ...current,
-                    { id: crypto.randomUUID(), title: "", minutes: 60 },
+                    { id: makeBrowserId(), title: "", minutes: 60 },
                   ])
                 }
               >

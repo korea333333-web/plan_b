@@ -239,7 +239,7 @@ function mergeWindows(windows: AvailabilityWindow[]): MinuteWindow[] {
 
   const merged: MinuteWindow[] = [];
   for (const window of sorted) {
-    const previous = merged.at(-1);
+    const previous = merged[merged.length - 1];
     if (!previous || window.start > previous.end) {
       merged.push({ ...window });
     } else {
