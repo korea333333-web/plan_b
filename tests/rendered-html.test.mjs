@@ -81,3 +81,24 @@ test("모바일 CTA와 기록 안내의 회귀를 막는다", async () => {
   assert.match(app, /기록이 쌓이는 방법/);
   assert.match(app, /최근에 결과를 남긴 계획/);
 });
+
+test("자동 생성 안내와 시간 눈금, 매화 한 송이 규칙을 유지한다", async () => {
+  const [app, styles] = await Promise.all([
+    readFile(new URL("../app/PlannerApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(app, /자동 생성 사용 방법/);
+  assert.match(app, /조건대로 미리보기 만들기/);
+  assert.match(app, /완료 1회마다 매화 1송이/);
+  assert.match(app, /Array\.from\(\{ length: 24 \}/);
+  assert.match(
+    app,
+    /const currentWeekCompleted = currentWeekOccurrences\.filter\([\s\S]*?plan\.status === "completed"/,
+  );
+  assert.match(app, /completed\.map\(\(plan, index\) =>/);
+  assert.doesNotMatch(app, /Math\.round\(rate \/ 10\)/);
+  assert.doesNotMatch(app, /conic-gradient\(from -90deg/);
+  assert.match(styles, /\.plum-canopy\s*\{/);
+  assert.match(styles, /\.time-mark\.is-major\s*\{/);
+});

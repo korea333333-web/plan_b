@@ -464,6 +464,14 @@ function WeeklyTimeline({
 
 function CircularDay({ plans }: { plans: PlanOccurrence[] }) {
   const sorted = [...plans].sort((a, b) => a.start.localeCompare(b.start));
+  const hourMarks = Array.from({ length: 24 }, (_, hour) => {
+    const angle = (hour / 24) * Math.PI * 2 - Math.PI / 2;
+    return {
+      hour,
+      left: 50 + Math.cos(angle) * 43,
+      top: 50 + Math.sin(angle) * 43,
+    };
+  });
   let cursor = 0;
   const stops: string[] = [];
   sorted.forEach((plan) => {
@@ -477,21 +485,32 @@ function CircularDay({ plans }: { plans: PlanOccurrence[] }) {
   });
   if (cursor < 100) stops.push(`rgba(98, 95, 90, 0.11) ${cursor}% 100%`);
   const background = stops.length
-    ? `conic-gradient(from -90deg, ${stops.join(", ")})`
+    ? `conic-gradient(${stops.join(", ")})`
     : "conic-gradient(rgba(98, 95, 90, 0.11) 0 100%)";
 
   return (
     <div className="circle-layout">
-      <div className="day-circle" style={{ background }}>
-        <div>
+      <div
+        className="day-circle"
+        style={{ background }}
+        role="img"
+        aria-label={`오늘 24시간 원형 일정표, 계획 ${plans.length}개`}
+      >
+        <div className="day-circle-center">
           <span>오늘의 계획</span>
           <strong>{plans.length}</strong>
           <small>개의 약속</small>
         </div>
-        <i className="time-mark mark-0">0</i>
-        <i className="time-mark mark-6">6</i>
-        <i className="time-mark mark-12">12</i>
-        <i className="time-mark mark-18">18</i>
+        {hourMarks.map(({ hour, left, top }) => (
+          <i
+            aria-hidden="true"
+            className={hour % 6 === 0 ? "time-mark is-major" : "time-mark"}
+            key={hour}
+            style={{ left: `${left}%`, top: `${top}%` }}
+          >
+            {String(hour).padStart(2, "0")}
+          </i>
+        ))}
       </div>
       <div className="circle-legend">
         {sorted.length ? (
@@ -593,19 +612,47 @@ function UnconfirmedCallout({ count }: { count: number }) {
   );
 }
 
-function PlumProgress({ rate, label }: { rate: number; label: string }) {
-  const active = Math.round(rate / 10);
+function PlumProgress({
+  completed,
+  assessedCount,
+}: {
+  completed: PlanOccurrence[];
+  assessedCount: number;
+}) {
+  const blossomCount = completed.length;
+  const label = assessedCount
+    ? `이번 주 확인한 계획 ${assessedCount}회 중 ${blossomCount}회 완료, 매화 ${blossomCount}송이`
+    : "이번 주에 아직 확인한 계획이 없어 핀 매화가 없습니다.";
+
   return (
-    <div className="plum-progress" aria-label={label}>
+    <div className="plum-progress" role="img" aria-label={label}>
       <div className="plum-branch branch-main" />
       <div className="plum-branch branch-a" />
       <div className="plum-branch branch-b" />
-      {Array.from({ length: 10 }, (_, index) => (
-        <i className={index < active ? "plum-blossom is-open" : "plum-blossom"} key={index}>
-          <b />
-        </i>
-      ))}
-      <span>{label}</span>
+      <div className="plum-branch branch-c" />
+      <div className="plum-branch branch-d" />
+      <div className="plum-canopy" aria-hidden="true">
+        {completed.map((plan, index) => (
+          <i
+            className="plum-blossom"
+            key={`${plan.id}-${plan.occurrenceDate}`}
+            style={
+              {
+                "--blossom-turn": `${((index % 7) - 3) * 4}deg`,
+              } as CSSProperties
+            }
+          >
+            <b />
+          </i>
+        ))}
+        {!blossomCount ? (
+          <span className="plum-empty">첫 완료를 남기면 이 가지에 매화가 피어요.</span>
+        ) : null}
+      </div>
+      <div className="plum-count">
+        <strong>{blossomCount}송이</strong>
+        <span>완료 1회마다 매화 1송이</span>
+      </div>
     </div>
   );
 }
@@ -881,7 +928,9 @@ export function PlannerApp() {
     (plan) =>
       plan.status === "completed" || plan.status === "incomplete",
   );
-  const weekCompletionRate = calculateCompletionRate(currentWeekAssessed);
+  const currentWeekCompleted = currentWeekOccurrences.filter(
+    (plan) => plan.status === "completed",
+  );
   const incompleteCount = decidedPlans.filter(
     (plan) => plan.status === "incomplete",
   ).length;
@@ -1216,20 +1265,16 @@ export function PlannerApp() {
                   </article>
                   <article className="paper-card blossom-card">
                     <div>
-                      <span className="eyebrow">이번 주 완료율</span>
+                      <span className="eyebrow">완료 1회 = 매화 1송이</span>
                       <h2>
-                        {currentWeekAssessed.length > 0
-                          ? "완료할수록 매화가 피어요"
-                          : "이번 주에 확인한 계획이 아직 없어요"}
+                        {currentWeekCompleted.length > 0
+                          ? `이번 주에 ${currentWeekCompleted.length}송이가 피었어요`
+                          : "이번 주 첫 매화를 기다리고 있어요"}
                       </h2>
                     </div>
                     <PlumProgress
-                      rate={weekCompletionRate}
-                      label={
-                        currentWeekAssessed.length > 0
-                          ? `이번 주 확인한 계획 중 ${weekCompletionRate}% 완료`
-                          : "계획의 결과를 남기면 매화가 피어나요."
-                      }
+                      completed={currentWeekCompleted}
+                      assessedCount={currentWeekAssessed.length}
                     />
                   </article>
                 </div>
@@ -1336,9 +1381,20 @@ function CreatePlanPage({
   const [maxMinutes, setMaxMinutes] = useState(120);
   const [autoSlot, setAutoSlot] = useState<30 | 60>(30);
   const [preview, setPreview] = useState<Omit<PlanDraft, "clientId">[]>([]);
+  const [autoSaveMessage, setAutoSaveMessage] = useState("");
+  const autoDailyCapacity = Math.min(
+    maxMinutes,
+    Math.max(0, timeToMinutes(availableEnd) - timeToMinutes(availableStart)),
+  );
 
   const toggleDay = (day: number, setter: (days: number[]) => void, values: number[]) => {
     setter(values.includes(day) ? values.filter((value) => value !== day) : [...values, day]);
+  };
+
+  const clearAutoPreview = () => {
+    setPreview([]);
+    setMessage("");
+    setAutoSaveMessage("");
   };
 
   const submitManual = async (event: FormEvent) => {
@@ -1375,6 +1431,7 @@ function CreatePlanPage({
 
   const makePreview = () => {
     setMessage("");
+    setAutoSaveMessage("");
     const validTasks = tasks.filter((task) => task.title.trim() && task.minutes > 0);
     if (!validTasks.length) {
       setMessage("자동으로 나눌 할 일을 하나 이상 적어주세요.");
@@ -1384,11 +1441,7 @@ function CreatePlanPage({
       setMessage("계획을 배치할 요일을 골라주세요.");
       return;
     }
-    const dayCapacity = Math.min(
-      maxMinutes,
-      Math.max(0, timeToMinutes(availableEnd) - timeToMinutes(availableStart)),
-    );
-    if (dayCapacity < autoSlot) {
+    if (autoDailyCapacity < autoSlot) {
       setMessage("가능 시간과 하루 최대 시간을 확인해 주세요.");
       return;
     }
@@ -1441,13 +1494,16 @@ function CreatePlanPage({
     if (!preview.length) return;
     setSaving(true);
     setMessage("");
+    setAutoSaveMessage("");
     try {
       for (const item of preview) {
         await onCreate(item);
       }
       onFinished();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "계획표를 저장하지 못했습니다.");
+      setAutoSaveMessage(
+        error instanceof Error ? error.message : "계획표를 저장하지 못했습니다.",
+      );
     } finally {
       setSaving(false);
     }
@@ -1462,10 +1518,18 @@ function CreatePlanPage({
           <p>직접 한 칸을 채우거나, 목표를 가능한 시간에 고르게 나눠보세요.</p>
         </div>
         <div className="mode-tabs">
-          <button className={mode === "manual" ? "is-active" : ""} onClick={() => setMode("manual")}>
+          <button
+            className={mode === "manual" ? "is-active" : ""}
+            disabled={saving}
+            onClick={() => setMode("manual")}
+          >
             직접 작성
           </button>
-          <button className={mode === "auto" ? "is-active" : ""} onClick={() => setMode("auto")}>
+          <button
+            className={mode === "auto" ? "is-active" : ""}
+            disabled={saving}
+            onClick={() => setMode("auto")}
+          >
             자동 생성
           </button>
         </div>
@@ -1513,6 +1577,8 @@ function CreatePlanPage({
                     className={repeat.includes(day) ? "is-active" : ""}
                     key={label}
                     onClick={() => toggleDay(day, setRepeat, repeat)}
+                    aria-label={`${WEEKDAYS_LONG[day]} ${repeat.includes(day) ? "반복 해제" : "반복 선택"}`}
+                    aria-pressed={repeat.includes(day)}
                   >
                     {label}
                   </button>
@@ -1562,178 +1628,316 @@ function CreatePlanPage({
           </aside>
         </form>
       ) : (
-        <div className="auto-create-grid">
-          <div className="paper-card form-paper">
-            <div className="form-section-title">
-              <i>自</i>
+        <div className="auto-workflow">
+          <ol className="paper-card auto-howto" aria-label="자동 생성 사용 방법">
+            <li>
+              <i aria-hidden="true">1</i>
               <div>
-                <span>자동 배치</span>
-                <strong>목표를 가능한 시간에 나눕니다</strong>
+                <strong>할 일과 총 시간을 적어요</strong>
+                <span>얼마나 해야 하는지 분 단위로 입력</span>
               </div>
-            </div>
-            <div className="task-builder">
-              <label>해야 할 일</label>
-              {tasks.map((task, index) => (
-                <div className="task-row" key={task.id}>
-                  <input
-                    value={task.title}
-                    onChange={(event) =>
-                      setTasks((current) =>
-                        current.map((item) =>
-                          item.id === task.id ? { ...item, title: event.target.value } : item,
-                        ),
-                      )
-                    }
-                    placeholder={`할 일 ${index + 1}`}
-                    maxLength={80}
-                  />
-                  <input
-                    type="number"
-                    min={30}
-                    step={30}
-                    value={task.minutes}
-                    onChange={(event) =>
-                      setTasks((current) =>
-                        current.map((item) =>
-                          item.id === task.id
-                            ? { ...item, minutes: Number(event.target.value) }
-                            : item,
-                        ),
-                      )
-                    }
-                    aria-label={`${index + 1}번째 할 일의 총 소요 시간`}
-                  />
-                  <span>분</span>
+            </li>
+            <li>
+              <i aria-hidden="true">2</i>
+              <div>
+                <strong>가능한 날짜와 시간을 골라요</strong>
+                <span>실제로 할 수 있는 범위만 선택</span>
+              </div>
+            </li>
+            <li>
+              <i aria-hidden="true">3</i>
+              <div>
+                <strong>미리보고 저장해요</strong>
+                <span>나뉜 일정을 확인한 뒤 계획표에 저장</span>
+              </div>
+            </li>
+          </ol>
+
+          <div className="auto-create-grid">
+            <fieldset
+              className="paper-card form-paper auto-controls"
+              disabled={saving}
+              aria-label="자동 계획 조건"
+            >
+              <div className="form-section-title">
+                <i>自</i>
+                <div>
+                  <span>자동 배치</span>
+                  <strong>세 가지만 정하면 계획을 나눠드려요</strong>
+                </div>
+              </div>
+
+              <section className="auto-form-step">
+                <div className="auto-step-heading">
+                  <i aria-hidden="true">1</i>
+                  <div>
+                    <strong>무엇을 나눌까요?</strong>
+                    <span>위에 적은 일부터 먼저 배치해요.</span>
+                  </div>
+                </div>
+                <div className="task-builder">
+                  <div className="task-column-labels" aria-hidden="true">
+                    <span>할 일 이름</span>
+                    <span>총 필요한 시간</span>
+                  </div>
+                  {tasks.map((task, index) => (
+                    <div className="task-row" key={task.id}>
+                      <input
+                        value={task.title}
+                        onChange={(event) => {
+                          setTasks((current) =>
+                            current.map((item) =>
+                              item.id === task.id
+                                ? { ...item, title: event.target.value }
+                                : item,
+                            ),
+                          );
+                          clearAutoPreview();
+                        }}
+                        placeholder={`예: 영어 단어 복습`}
+                        maxLength={80}
+                        aria-label={`${index + 1}번째 할 일 이름`}
+                      />
+                      <input
+                        type="number"
+                        min={30}
+                        step={30}
+                        value={task.minutes}
+                        onChange={(event) => {
+                          setTasks((current) =>
+                            current.map((item) =>
+                              item.id === task.id
+                                ? { ...item, minutes: Number(event.target.value) }
+                                : item,
+                            ),
+                          );
+                          clearAutoPreview();
+                        }}
+                        aria-label={`${index + 1}번째 할 일의 총 소요 시간`}
+                      />
+                      <span>분</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTasks((current) =>
+                            current.length === 1
+                              ? current
+                              : current.filter((item) => item.id !== task.id),
+                          );
+                          clearAutoPreview();
+                        }}
+                        aria-label={`${index + 1}번째 할 일 삭제`}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
                   <button
                     type="button"
-                    onClick={() =>
-                      setTasks((current) =>
-                        current.length === 1 ? current : current.filter((item) => item.id !== task.id),
-                      )
-                    }
-                    aria-label={`${index + 1}번째 할 일 삭제`}
+                    className="add-task"
+                    onClick={() => {
+                      setTasks((current) => [
+                        ...current,
+                        { id: makeBrowserId(), title: "", minutes: 60 },
+                      ]);
+                      clearAutoPreview();
+                    }}
                   >
-                    ×
+                    + 할 일 추가
                   </button>
                 </div>
-              ))}
+                </section>
+
+              <section className="auto-form-step">
+                <div className="auto-step-heading">
+                  <i aria-hidden="true">2</i>
+                  <div>
+                    <strong>언제 할까요?</strong>
+                    <span>배치할 기간과 실행할 요일을 골라주세요.</span>
+                  </div>
+                </div>
+                <div className="field-row two-columns">
+                  <label className="field">
+                    <span>시작일</span>
+                    <input
+                      type="date"
+                      value={autoStartDate}
+                      onChange={(event) => {
+                        setAutoStartDate(event.target.value);
+                        clearAutoPreview();
+                      }}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>마감일</span>
+                    <input
+                      type="date"
+                      value={autoEndDate}
+                      min={autoStartDate}
+                      onChange={(event) => {
+                        setAutoEndDate(event.target.value);
+                        clearAutoPreview();
+                      }}
+                    />
+                  </label>
+                </div>
+                <fieldset className="day-fieldset">
+                  <legend>
+                    실행할 요일
+                    <small>선택한 요일마다 같은 가능 시간이 적용돼요.</small>
+                  </legend>
+                  <div>
+                    {WEEKDAYS.map((label, day) => (
+                      <button
+                        type="button"
+                        className={allowedDays.includes(day) ? "is-active" : ""}
+                        key={label}
+                        onClick={() => {
+                          toggleDay(day, setAllowedDays, allowedDays);
+                          clearAutoPreview();
+                        }}
+                        aria-label={`${WEEKDAYS_LONG[day]} ${allowedDays.includes(day) ? "선택 해제" : "선택"}`}
+                        aria-pressed={allowedDays.includes(day)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
+                </section>
+
+              <section className="auto-form-step">
+                <div className="auto-step-heading">
+                  <i aria-hidden="true">3</i>
+                  <div>
+                    <strong>하루 중 언제 가능한가요?</strong>
+                    <span>하루에 무리하지 않을 만큼만 나눠요.</span>
+                  </div>
+                </div>
+                <div className="field-row auto-time-row">
+                  <label className="field">
+                    <span>하루 시작 가능</span>
+                    <input
+                      type="time"
+                      value={availableStart}
+                      onChange={(event) => {
+                        setAvailableStart(event.target.value);
+                        clearAutoPreview();
+                      }}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>하루 종료 가능</span>
+                    <input
+                      type="time"
+                      value={availableEnd}
+                      onChange={(event) => {
+                        setAvailableEnd(event.target.value);
+                        clearAutoPreview();
+                      }}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>하루 최대 배정</span>
+                    <select
+                      value={maxMinutes}
+                      onChange={(event) => {
+                        setMaxMinutes(Number(event.target.value));
+                        clearAutoPreview();
+                      }}
+                    >
+                      <option value={60}>1시간</option>
+                      <option value={120}>2시간</option>
+                      <option value={180}>3시간</option>
+                      <option value={240}>4시간</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>한 번에 나누기</span>
+                    <select
+                      value={autoSlot}
+                      onChange={(event) => {
+                        setAutoSlot(Number(event.target.value) as 30 | 60);
+                        clearAutoPreview();
+                      }}
+                    >
+                      <option value={30}>30분씩</option>
+                      <option value={60}>1시간씩</option>
+                    </select>
+                  </label>
+                </div>
+                  <p className="auto-capacity-note">
+                  {autoDailyCapacity >= autoSlot
+                    ? `현재 설정은 하루 최대 ${autoDailyCapacity}분을 ${autoSlot}분 단위로 날짜 사이에 나눠요.`
+                    : "가능한 시간대를 다시 확인해 주세요."}
+                  </p>
+              </section>
+
+              <button type="button" className="outline-button" onClick={makePreview}>
+                조건대로 미리보기 만들기
+              </button>
+              {message ? (
+                <p className="form-message" role="status">
+                  {message}
+                </p>
+              ) : null}
+            </fieldset>
+
+            <aside className="paper-card auto-preview-paper">
+              <span className="eyebrow">마지막 확인</span>
+              <h2 aria-live="polite">
+                {preview.length
+                  ? `총 ${preview.length}개의 일정이 만들어졌어요`
+                  : "미리보기를 먼저 만들어 주세요"}
+              </h2>
+              <div className="auto-preview-list">
+                {preview.length ? (
+                  preview.slice(0, 12).map((item, index) => (
+                    <article key={`${item.date}-${item.start}-${index}`}>
+                      <time>{item.date.slice(5)}</time>
+                      <i style={{ background: item.category || CATEGORY_COLORS[0] }} />
+                      <div>
+                        <strong>{item.title}</strong>
+                        <span>{item.start}–{item.end}</span>
+                      </div>
+                    </article>
+                  ))
+                ) : (
+                  <div className="auto-preview-empty">
+                    <i aria-hidden="true">1 → 2 → 3</i>
+                    <p>입력 카드에서 세 단계를 정한 뒤 미리보기 버튼을 눌러주세요.</p>
+                  </div>
+                )}
+              </div>
+              {preview.length > 12 ? (
+                <p className="auto-preview-note">
+                  앞 12개만 보여드려요. 저장하면 전체 {preview.length}개가 들어갑니다.
+                </p>
+              ) : null}
+              {preview.length ? (
+                <p className="auto-preview-note">
+                  기존 계획과 겹치는지는 확인하지 않으니 시간표를 한 번 확인해 주세요.
+                </p>
+              ) : null}
+              {autoSaveMessage ? (
+                <p className="form-message" role="status">
+                  {autoSaveMessage}
+                </p>
+              ) : null}
               <button
                 type="button"
-                className="add-task"
-                onClick={() =>
-                  setTasks((current) => [
-                    ...current,
-                    { id: makeBrowserId(), title: "", minutes: 60 },
-                  ])
-                }
+                className="seal-button full-button"
+                onClick={() => void savePreview()}
+                disabled={!preview.length || saving || !clientReady}
               >
-                + 할 일 추가
+                {saving
+                  ? "저장하는 중…"
+                  : preview.length
+                    ? `일정 ${preview.length}개를 계획표에 저장`
+                    : "미리보기 후 저장할 수 있어요"}
               </button>
-            </div>
-            <div className="field-row two-columns">
-              <label className="field">
-                <span>시작일</span>
-                <input
-                  type="date"
-                  value={autoStartDate}
-                  onChange={(event) => setAutoStartDate(event.target.value)}
-                />
-              </label>
-              <label className="field">
-                <span>마감일</span>
-                <input
-                  type="date"
-                  value={autoEndDate}
-                  min={autoStartDate}
-                  onChange={(event) => setAutoEndDate(event.target.value)}
-                />
-              </label>
-            </div>
-            <fieldset className="day-fieldset">
-              <legend>가능한 요일</legend>
-              <div>
-                {WEEKDAYS.map((label, day) => (
-                  <button
-                    type="button"
-                    className={allowedDays.includes(day) ? "is-active" : ""}
-                    key={label}
-                    onClick={() => toggleDay(day, setAllowedDays, allowedDays)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </fieldset>
-            <div className="field-row auto-time-row">
-              <label className="field">
-                <span>가능 시작</span>
-                <input
-                  type="time"
-                  value={availableStart}
-                  onChange={(event) => setAvailableStart(event.target.value)}
-                />
-              </label>
-              <label className="field">
-                <span>가능 종료</span>
-                <input
-                  type="time"
-                  value={availableEnd}
-                  onChange={(event) => setAvailableEnd(event.target.value)}
-                />
-              </label>
-              <label className="field">
-                <span>하루 최대</span>
-                <select value={maxMinutes} onChange={(event) => setMaxMinutes(Number(event.target.value))}>
-                  <option value={60}>1시간</option>
-                  <option value={120}>2시간</option>
-                  <option value={180}>3시간</option>
-                  <option value={240}>4시간</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>계획 단위</span>
-                <select
-                  value={autoSlot}
-                  onChange={(event) => setAutoSlot(Number(event.target.value) as 30 | 60)}
-                >
-                  <option value={30}>30분</option>
-                  <option value={60}>1시간</option>
-                </select>
-              </label>
-            </div>
-            <button type="button" className="outline-button" onClick={makePreview}>
-              자동 계획 만들기
-            </button>
+            </aside>
           </div>
-          <aside className="paper-card auto-preview-paper">
-            <span className="eyebrow">배치 미리보기</span>
-            <h2>{preview.length ? `${preview.length}개의 일정` : "아직 생성 전입니다"}</h2>
-            <div className="auto-preview-list">
-              {preview.length ? (
-                preview.slice(0, 12).map((item, index) => (
-                  <article key={`${item.date}-${item.start}-${index}`}>
-                    <time>{item.date.slice(5)}</time>
-                    <i style={{ background: item.category || CATEGORY_COLORS[0] }} />
-                    <div>
-                      <strong>{item.title}</strong>
-                      <span>{item.start}–{item.end}</span>
-                    </div>
-                  </article>
-                ))
-              ) : (
-                <p>할 일과 가능한 시간을 입력하면 이곳에 배치 결과가 나타납니다.</p>
-              )}
-            </div>
-            {message ? <p className="form-message">{message}</p> : null}
-            <button
-              type="button"
-              className="seal-button full-button"
-              onClick={() => void savePreview()}
-              disabled={!preview.length || saving || !clientReady}
-            >
-              {saving ? "저장하는 중…" : "계획표에 저장"}
-            </button>
-          </aside>
         </div>
       )}
     </section>
