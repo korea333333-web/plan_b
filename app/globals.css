@@ -180,6 +180,34 @@ select:focus-visible {
   margin: 22px 3px 30px;
 }
 
+.profile-copy {
+  min-width: 0;
+}
+
+.profile-copy span {
+  max-width: 104px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-signout {
+  margin-left: auto;
+  padding: 6px 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.52);
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.account-signout:hover {
+  border-color: rgba(173, 52, 75, 0.3);
+  color: var(--maewha);
+}
+
 .profile-block > i,
 .mobile-seal {
   display: grid;
@@ -294,6 +322,160 @@ select:focus-visible {
   padding: 30px 34px 80px;
 }
 
+.auth-page {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 32px 18px;
+}
+
+.auth-card {
+  position: relative;
+  z-index: 21;
+  width: min(100%, 480px);
+  overflow: hidden;
+  padding: 38px;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(241, 217, 223, 0.55), transparent 17rem),
+    rgba(255, 251, 248, 0.94);
+}
+
+.auth-card::before {
+  position: absolute;
+  z-index: -1;
+  top: -92px;
+  right: -72px;
+  width: 210px;
+  height: 210px;
+  border: 1px solid rgba(173, 52, 75, 0.12);
+  border-radius: 50%;
+  content: "";
+}
+
+.auth-heading {
+  margin-bottom: 24px;
+  text-align: center;
+}
+
+.auth-eyebrow {
+  margin: 0;
+  color: var(--maewha);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+
+.auth-heading h1 {
+  margin: 9px 0 8px;
+  color: var(--maewha-dark);
+  font-family: "Noto Serif KR", "Batang", serif;
+  font-size: clamp(38px, 10vw, 54px);
+  letter-spacing: -0.06em;
+}
+
+.auth-heading > p:last-child {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.auth-action {
+  display: grid;
+  gap: 13px;
+}
+
+.google-auth-button {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 12px 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  background: var(--paper-bright);
+  box-shadow: 0 7px 20px rgba(63, 55, 49, 0.07);
+  cursor: pointer;
+  font-weight: 800;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.google-auth-button:hover:not(:disabled) {
+  border-color: rgba(173, 52, 75, 0.42);
+  box-shadow: 0 9px 24px rgba(74, 53, 47, 0.12);
+  transform: translateY(-1px);
+}
+
+.google-auth-button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.google-auth-icon {
+  width: 21px;
+  height: 21px;
+  flex: 0 0 auto;
+}
+
+.auth-message {
+  margin: 0;
+  padding: 11px 13px;
+  border-radius: 9px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.auth-message.is-error {
+  border: 1px solid rgba(173, 52, 75, 0.22);
+  background: rgba(173, 52, 75, 0.07);
+  color: var(--maewha-dark);
+}
+
+.auth-note {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.auth-loading-card {
+  display: grid;
+  min-height: 300px;
+  place-items: center;
+  align-content: center;
+  gap: 9px;
+  text-align: center;
+}
+
+.auth-loading-card > i {
+  display: grid;
+  width: 68px;
+  height: 68px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--maewha);
+  font-family: "Batang", serif;
+  font-size: 27px;
+  font-style: normal;
+}
+
+.auth-loading-card > strong {
+  color: var(--maewha-dark);
+  font-family: "Noto Serif KR", "Batang", serif;
+  font-size: 28px;
+}
+
+.auth-loading-card > span {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
 .page-section {
   width: min(100%, 1320px);
   margin: 0 auto;
@@ -395,12 +577,64 @@ select:focus-visible {
   font-weight: 800;
 }
 
+.sync-message button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.sync-error-message {
+  border-color: rgba(173, 52, 75, 0.28);
+  background: rgba(255, 239, 242, 0.92);
+  color: var(--maewha-dark);
+}
+
+.legacy-import-message {
+  border-color: rgba(79, 107, 91, 0.3);
+  background: rgba(238, 246, 241, 0.92);
+  color: #365143;
+}
+
+.import-result-message {
+  border-color: rgba(79, 107, 91, 0.24);
+  background: rgba(246, 250, 247, 0.92);
+  color: var(--jade);
+}
+
 .loading-paper {
   display: grid;
   min-height: 280px;
   place-items: center;
   color: var(--ink-soft);
   font-family: "Noto Serif KR", "Batang", serif;
+}
+
+.load-error-paper {
+  display: grid;
+  min-height: 280px;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  padding: 32px;
+  text-align: center;
+}
+
+.load-error-paper strong {
+  font-family: "Noto Serif KR", "Batang", serif;
+  font-size: 22px;
+}
+
+.load-error-paper p {
+  margin: 0;
+  color: var(--ink-soft);
+}
+
+.load-error-paper button {
+  margin-top: 8px;
+  padding: 10px 18px;
+  border-radius: 9px;
+  background: var(--maewha);
+  color: #fff;
+  font-weight: 800;
 }
 
 .empty-planner {
@@ -943,6 +1177,14 @@ select:focus-visible {
 .sheet-actions button:last-child {
   border-color: var(--maewha);
   color: var(--maewha);
+}
+
+.completion-actions button:disabled,
+.sheet-actions button:disabled,
+.quiet-delete:disabled,
+.sheet-delete:disabled {
+  cursor: wait;
+  opacity: 0.48;
 }
 
 .quiet-delete {
@@ -2148,9 +2390,31 @@ select:focus-visible {
     text-align: center;
   }
 
-  .mobile-header > span {
+  .mobile-account {
+    display: grid;
+    justify-items: end;
+    gap: 2px;
+  }
+
+  .mobile-account span {
+    max-width: 104px;
+    overflow: hidden;
     color: var(--ink-soft);
     font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-account button {
+    min-height: 30px;
+    padding: 5px 9px;
+    border: 1px solid rgba(173, 52, 75, 0.28);
+    border-radius: 8px;
+    background: rgba(255, 253, 251, 0.82);
+    color: var(--maewha);
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 800;
   }
 
   .main-content {
@@ -2251,6 +2515,23 @@ select:focus-visible {
 @media (max-width: 620px) {
   .falling-petal {
     opacity: 0.42;
+  }
+
+  .auth-page {
+    padding: 20px 14px;
+  }
+
+  .auth-card {
+    padding: 28px 20px;
+  }
+
+  .auth-heading h1 {
+    font-size: 40px;
+  }
+
+  .sync-message {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .page-heading {

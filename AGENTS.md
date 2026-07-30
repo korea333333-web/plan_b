@@ -9,11 +9,13 @@
 
 ## 저장소 지도
 
-- `app/PlannerApp.tsx`: 세 화면, 폼, 시간표, 기록을 포함한 단일 클라이언트 앱
-- `app/api/plans/route.ts`: vinext/Sites용 계획 조회·생성·상태 변경·삭제 API
+- `app/PlannerApp.tsx`: 인증 상태 연결, 세 화면, 폼, 시간표, 기록을 포함한 클라이언트 앱
+- `app/AuthGate.tsx`: Google OAuth 로그인 화면
+- `app/api/plans/route.ts`: 기존 Sites D1 계획 가져오기용 과도기 API
 - `app/globals.css`: 반응형 레이아웃과 매화·한지 디자인
 - `lib/planner.ts`: 자동 배치, 날짜, 상태, 통계, 확정 대사
-- `db/schema.ts`: 단일 `plans` D1 테이블
+- `lib/supabase.ts`, `lib/supabase-plans.ts`: 인증 클라이언트와 계획 행 변환
+- `db/schema.ts`: 기존 계획 가져오기용 D1 테이블
 - `tests/`: 도메인 및 서버 렌더링 테스트
 - `.openai/hosting.json`: 로컬·Sites의 `DB` D1 바인딩
 
@@ -27,16 +29,18 @@
 - 반복 계획의 완료·미완료 판정은 발생 날짜별로 독립적이며, 다른 날짜의 같은 반복 계획에 영향을 주지 않는다.
 - 대사는 `lib/planner.ts`가 단일 기준이며 문구를 임의로 고치지 않는다.
 - 캐릭터 사진과 웹툰 원본 이미지는 아직 넣지 않는다.
-- 로컬·Sites는 vinext와 D1을 사용한다. D1 행은 브라우저 `localStorage`의 `clientId`로 구분한다.
-- 로컬·Sites에서 D1 API를 쓸 수 없으면 현재 세션은 브라우저 계획 저장으로 전환되고 안내 배너를 표시한다.
-- Vercel은 `next build` 결과를 실행하고 계획 자체를 브라우저 `localStorage`에 저장한다. Vercel에서 D1 서버 동기화는 없다.
-- 어느 환경에도 로그인이나 교차 기기 동기화는 없다.
+- 모든 환경은 Supabase Google OAuth 로그인이 필요하며 Postgres `plans`와 RLS를 단일 저장소로 사용한다.
+- 같은 계정은 모바일·PC와 다른 브라우저에서 계획을 공유한다.
+- 새 계획 저장이 실패해도 D1이나 브라우저 저장으로 자동 폴백하지 않는다.
+- 과거 Vercel `localStorage`와 Sites D1 계획은 사용자가 명시적으로 가져올 때만 Supabase에 순차 복사한다.
 
 ## 구현상 주의
 
-- 로컬·Sites의 자동 생성 저장은 일정별 순차 POST다. 원자적 일괄 저장으로 가정하지 않는다.
-- Vercel의 브라우저 저장을 D1 저장이나 서버 백업처럼 설명하지 않는다.
-- 브라우저 폴백 계획과 D1 계획은 자동 병합되지 않는다.
+- 자동 생성 저장과 기존 계획 가져오기는 일정별 순차 INSERT다. 원자적 일괄 저장으로 가정하지 않으며, 자동 생성 재시도는 이미 성공한 미리보기 항목을 제외한다.
+- publishable key만 브라우저에 제공하며 service role key를 클라이언트 환경 변수에 넣지 않는다.
+- Google OAuth Client Secret은 Supabase 공급자 설정에만 보관하며 저장소, 채팅, `NEXT_PUBLIC_*` 환경 변수에 넣지 않는다.
+- 사용자별 접근 제어는 UI 필터가 아니라 Supabase RLS가 강제한다.
+- 기존 계획은 현재 계정 데이터와 자동 병합하거나 원본 저장소에서 자동 삭제하지 않는다.
 - 반복 일정은 한 DB 행을 여러 요일에 보여 주되 판정은 `occurrenceStatuses`에 발생 날짜별로 저장한다. 비반복 일정은 기존 `status`를 사용한다.
 - 반복 계획의 삭제는 선택한 회차만이 아니라 반복 계획 전체 행을 삭제한다.
 - `occurrenceStatuses` 추가 migration은 기존 반복행의 전역 `status`를 `planned`로 초기화하며, 비반복행의 기존 `status`는 유지한다.

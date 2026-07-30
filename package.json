@@ -12,11 +12,12 @@
     "build:sites": "vinext build",
     "build:vercel": "next build",
     "start": "vinext start",
-    "test": "node --test tests/planner-engine.test.mjs && vinext build && node --test tests/rendered-html.test.mjs",
+    "test": "node --test tests/planner-engine.test.mjs tests/supabase-plans.test.ts && vinext build && node --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@supabase/supabase-js": "2.111.0",
     "drizzle-orm": "0.45.2",
     "next": "16.2.6",
     "react": "19.2.6",

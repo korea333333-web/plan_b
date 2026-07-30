@@ -22,37 +22,31 @@ import {
   planOccursOnDate,
   type Weekday,
 } from "../lib/planner";
+import {
+  fromSupabasePlanRow,
+  getPlanSignature,
+  toSupabasePlanInsert,
+  toSupabasePlanUpdate,
+} from "../lib/supabase-plans";
+import {
+  type Plan,
+  type PlanDraft,
+  type PlanStatus,
+} from "../lib/plan-types";
+import {
+  getSupabaseClient,
+  getSupabaseConfigurationError,
+  isSupabaseConfigured,
+} from "../lib/supabase";
+import { AuthGate } from "./AuthGate";
 
 type PageId = "planner" | "create" | "records";
 type PlannerView = "week" | "today";
 type TodayView = "list" | "circle";
-type PlanStatus = "planned" | "completed" | "incomplete" | "unconfirmed";
-type AssessedPlanStatus = "completed" | "incomplete";
-type PlanSource = "manual" | "auto";
-type StorageMode = "server" | "local";
-
-type Plan = {
-  id: number;
-  clientId: string;
-  title: string;
-  date: string;
-  start: string;
-  end: string;
-  repeat: number[] | null;
-  category: string | null;
-  memo: string;
-  status: PlanStatus;
-  occurrenceStatuses?: Record<string, AssessedPlanStatus>;
-  source: PlanSource;
-  createdAt: string;
-  updatedAt: string;
-};
 
 type PlanOccurrence = Plan & {
   occurrenceDate: string;
 };
-
-type PlanDraft = Omit<Plan, "id" | "createdAt" | "updatedAt">;
 
 type AutoTask = {
   id: string;
@@ -64,6 +58,11 @@ type Reaction = {
   name: string;
   line: string;
   kind: "completed" | "incomplete";
+};
+
+type AuthenticatedUser = {
+  id: string;
+  email?: string;
 };
 
 const WEEKDAYS = ["일", "월", "화", "수", "목", "금", "토"];
@@ -78,8 +77,10 @@ const NAV_ITEMS: { id: PageId; icon: string; label: string }[] = [
 const CATEGORY_COLORS = ["#ad344b", "#4f6b5b", "#b27b42", "#625f5a", "#7a5f80"];
 const CHARACTER_NAMES = ["청명", "백천", "유이설", "조걸", "윤종"] as const;
 const LOCAL_PLAN_STORAGE_PREFIX = "maewha-plans:";
-const BROWSER_ONLY_STORAGE =
-  process.env.NEXT_PUBLIC_PLAN_STORAGE_MODE === "local";
+const LEGACY_IMPORT_STORAGE_PREFIX = "maewha-supabase-imported:";
+const SUPABASE_PAGE_SIZE = 1000;
+const HAS_LEGACY_D1 =
+  process.env.NEXT_PUBLIC_PLAN_STORAGE_MODE !== "local";
 let memoryClientId = "";
 
 function makeBrowserId() {
@@ -202,36 +203,42 @@ function getOrCreateClientId() {
   return memoryClientId;
 }
 
-class ApiRequestError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-  ) {
-    super(message);
-  }
-}
-
 async function readJson<T>(response: Response): Promise<T> {
   const payload = (await response.json()) as T & { error?: string };
   if (!response.ok) {
-    throw new ApiRequestError(
-      payload.error || "요청을 처리하지 못했습니다.",
-      response.status,
-    );
+    throw new Error(payload.error || "요청을 처리하지 못했습니다.");
   }
   return payload;
 }
 
-function shouldUseLocalFallback(error: unknown) {
-  return (
-    !(error instanceof ApiRequestError) ||
-    error.status === 404 ||
-    error.status >= 500
-  );
-}
-
 function localPlanStorageKey(clientId: string) {
   return `${LOCAL_PLAN_STORAGE_PREFIX}${clientId}`;
+}
+
+function legacyImportStorageKey(userId: string, clientId: string) {
+  return `${LEGACY_IMPORT_STORAGE_PREFIX}${userId}:${clientId}`;
+}
+
+function hasImportedLegacyPlans(userId: string, clientId: string) {
+  try {
+    return (
+      window.localStorage.getItem(legacyImportStorageKey(userId, clientId)) ===
+      "done"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function markLegacyPlansImported(userId: string, clientId: string) {
+  try {
+    window.localStorage.setItem(
+      legacyImportStorageKey(userId, clientId),
+      "done",
+    );
+  } catch {
+    // The import itself has succeeded. A blocked marker may show the offer again.
+  }
 }
 
 function isStoredPlan(value: unknown, clientId: string): value is Plan {
@@ -288,25 +295,80 @@ function readLocalPlans(clientId: string): Plan[] {
   }
 }
 
-function writeLocalPlans(clientId: string, plansToStore: Plan[]) {
+function dedupePlansBySignature(plans: Plan[]) {
+  const bySignature = new Map<string, Plan>();
+  for (const plan of plans) {
+    const signature = getPlanSignature(plan);
+    if (!bySignature.has(signature)) {
+      bySignature.set(signature, plan);
+    }
+  }
+  return [...bySignature.values()];
+}
+
+async function readLegacyPlans(clientId: string) {
+  const localPlans = readLocalPlans(clientId);
+  if (!HAS_LEGACY_D1) {
+    return {
+      plans: dedupePlansBySignature(localPlans),
+      complete: true,
+    };
+  }
+
   try {
-    window.localStorage.setItem(
-      localPlanStorageKey(clientId),
-      JSON.stringify(plansToStore),
-    );
+    const d1Plans: Plan[] = [];
+    let afterId: number | null = null;
+
+    for (let page = 0; page < 100; page += 1) {
+      const params = new URLSearchParams({ clientId });
+      if (afterId !== null) {
+        params.set("afterId", String(afterId));
+      }
+      const response = await fetch(`/api/plans?${params}`, {
+        cache: "no-store",
+      });
+      const payload = await readJson<{
+        plans: Plan[];
+        complete?: boolean;
+        nextCursor?: number | null;
+      }>(response);
+      if (!Array.isArray(payload.plans)) {
+        throw new Error("기존 계획 응답이 올바르지 않습니다.");
+      }
+      d1Plans.push(...payload.plans);
+
+      if (payload.complete !== false && payload.nextCursor == null) {
+        return {
+          plans: dedupePlansBySignature([...localPlans, ...d1Plans]),
+          complete: true,
+        };
+      }
+      if (
+        !Number.isSafeInteger(payload.nextCursor) ||
+        Number(payload.nextCursor) <= (afterId ?? 0)
+      ) {
+        return {
+          plans: dedupePlansBySignature([...localPlans, ...d1Plans]),
+          complete: false,
+        };
+      }
+      afterId = Number(payload.nextCursor);
+    }
+
+    return {
+      plans: dedupePlansBySignature([...localPlans, ...d1Plans]),
+      complete: false,
+    };
   } catch {
-    throw new Error("브라우저 저장 공간을 사용할 수 없습니다.");
+    return {
+      plans: dedupePlansBySignature(localPlans),
+      complete: false,
+    };
   }
 }
 
-function makeLocalPlanId() {
-  const browserCrypto =
-    typeof globalThis.crypto === "undefined" ? null : globalThis.crypto;
-  const random =
-    browserCrypto && typeof browserCrypto.getRandomValues === "function"
-      ? browserCrypto.getRandomValues(new Uint16Array(1))[0]
-      : Math.floor(Math.random() * 65_536);
-  return -(Date.now() * 1_000 + random);
+function getPlanErrorMessage(action: "불러오지" | "저장하지" | "변경하지" | "삭제하지") {
+  return `계획을 ${action} 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.`;
 }
 
 function Petals() {
@@ -536,6 +598,7 @@ function TodayList({
   now,
   onStatus,
   onDelete,
+  pendingPlanIds,
 }: {
   plans: PlanOccurrence[];
   now: Date;
@@ -544,6 +607,7 @@ function TodayList({
     status: "completed" | "incomplete",
   ) => void;
   onDelete: (plan: Plan) => void;
+  pendingPlanIds: ReadonlySet<number>;
 }) {
   const sorted = [...plans].sort((a, b) => a.start.localeCompare(b.start));
 
@@ -551,6 +615,7 @@ function TodayList({
     <div className="today-list">
       {sorted.map((plan) => {
         const status = effectiveStatus(plan, now);
+        const isPending = pendingPlanIds.has(plan.id);
         return (
           <article
             className="today-plan-card paper-card"
@@ -572,13 +637,24 @@ function TodayList({
               {plan.memo ? <p>{plan.memo}</p> : <p className="muted">메모 없음</p>}
               {status === "unconfirmed" ? (
                 <div className="completion-actions">
-                  <button onClick={() => onStatus(plan, "completed")}>완료했어</button>
-                  <button onClick={() => onStatus(plan, "incomplete")}>못 했어</button>
+                  <button
+                    disabled={isPending}
+                    onClick={() => onStatus(plan, "completed")}
+                  >
+                    완료했어
+                  </button>
+                  <button
+                    disabled={isPending}
+                    onClick={() => onStatus(plan, "incomplete")}
+                  >
+                    못 했어
+                  </button>
                 </div>
               ) : null}
             </div>
             <button
               className="quiet-delete"
+              disabled={isPending}
               onClick={() => onDelete(plan)}
               aria-label={
                 plan.repeat?.length
@@ -658,6 +734,93 @@ function PlumProgress({
 }
 
 export function PlannerApp() {
+  const [authLoading, setAuthLoading] = useState(isSupabaseConfigured);
+  const [user, setUser] = useState<AuthenticatedUser | null>(null);
+
+  useEffect(() => {
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      return;
+    }
+
+    let active = true;
+    let authEventVersion = 0;
+
+    void supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (!active || authEventVersion > 0) return;
+        setUser(data.session?.user ?? null);
+        setAuthLoading(false);
+      })
+      .catch(() => {
+        if (!active || authEventVersion > 0) return;
+        setUser(null);
+        setAuthLoading(false);
+      });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!active) return;
+      authEventVersion += 1;
+      setUser(session?.user ?? null);
+      setAuthLoading(false);
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  const signOut = useCallback(async () => {
+    const supabase = getSupabaseClient();
+    if (!supabase) return;
+    await supabase.auth.signOut({ scope: "local" });
+  }, []);
+
+  if (authLoading) {
+    return (
+      <main className="auth-page site-shell">
+        <Petals />
+        <section className="auth-card auth-loading-card paper-card">
+          <i aria-hidden="true">梅</i>
+          <strong>매화수련록</strong>
+          <span>로그인 상태를 확인하는 중…</span>
+        </section>
+      </main>
+    );
+  }
+
+  if (!user) {
+    return (
+      <>
+        <Petals />
+        <AuthGate />
+      </>
+    );
+  }
+
+  return (
+    <PlannerWorkspace
+      key={user.id}
+      userId={user.id}
+      userEmail={user.email ?? "이메일 계정"}
+      onSignOut={signOut}
+    />
+  );
+}
+
+function PlannerWorkspace({
+  userId,
+  userEmail,
+  onSignOut,
+}: {
+  userId: string;
+  userEmail: string;
+  onSignOut: () => Promise<void>;
+}) {
   const [page, setPage] = useState<PageId>("planner");
   const [plannerView, setPlannerView] = useState<PlannerView>("week");
   const [todayView, setTodayView] = useState<TodayView>("list");
@@ -671,17 +834,35 @@ export function PlannerApp() {
   );
   const [plans, setPlans] = useState<Plan[]>([]);
   const plansRef = useRef<Plan[]>([]);
-  const storageModeRef = useRef<StorageMode>(
-    BROWSER_ONLY_STORAGE ? "local" : "server",
-  );
-  const [storageMode, setStorageMode] = useState<StorageMode>(
-    BROWSER_ONLY_STORAGE ? "local" : "server",
-  );
+  const loadRequestIdRef = useRef(0);
+  const mutationVersionRef = useRef(0);
+  const loadingRef = useRef(true);
   const [loading, setLoading] = useState(true);
+  const [syncError, setSyncError] = useState("");
+  const [legacyPlans, setLegacyPlans] = useState<Plan[]>([]);
+  const [legacyImporting, setLegacyImporting] = useState(false);
+  const [legacyMessage, setLegacyMessage] = useState("");
+  const [legacyMessageIsError, setLegacyMessageIsError] = useState(false);
+  const [legacyDiscoveryComplete, setLegacyDiscoveryComplete] = useState(true);
+  const [legacyDiscoveryAttempt, setLegacyDiscoveryAttempt] = useState(0);
+  const legacyCheckStartedRef = useRef(false);
   const [selectedPlan, setSelectedPlan] =
     useState<PlanOccurrence | null>(null);
   const [reaction, setReaction] = useState<Reaction | null>(null);
   const [reactionIndex, setReactionIndex] = useState(0);
+  const pendingPlanIdsRef = useRef(new Set<number>());
+  const [pendingPlanIds, setPendingPlanIds] = useState<Set<number>>(
+    () => new Set(),
+  );
+
+  const setPlanPending = useCallback((planId: number, pending: boolean) => {
+    if (pending) {
+      pendingPlanIdsRef.current.add(planId);
+    } else {
+      pendingPlanIdsRef.current.delete(planId);
+    }
+    setPendingPlanIds(new Set(pendingPlanIdsRef.current));
+  }, []);
 
   const navigateToPage = useCallback((nextPage: PageId) => {
     setSelectedPlan(null);
@@ -694,21 +875,11 @@ export function PlannerApp() {
     setPlans(nextPlans);
   }, []);
 
-  const setActiveStorageMode = useCallback((mode: StorageMode) => {
-    storageModeRef.current = mode;
-    setStorageMode(mode);
-  }, []);
-
-  const replaceWithLocalPlans = useCallback(
-    (id: string, nextPlans: Plan[]) => {
-      writeLocalPlans(id, nextPlans);
-      replacePlans(nextPlans);
-      setActiveStorageMode("local");
-    },
-    [replacePlans, setActiveStorageMode],
-  );
-
   const weekDates = useMemo(() => getWeekDates(anchorDate), [anchorDate]);
+  const existingPlanSignatures = useMemo(
+    () => new Set(plans.map(getPlanSignature)),
+    [plans],
+  );
   const weekPlans = useMemo(
     () => plans.filter((plan) => weekDates.some((date) => planOccursOn(plan, date))),
     [plans, weekDates],
@@ -720,35 +891,105 @@ export function PlannerApp() {
       .map((plan) => ({ ...plan, occurrenceDate: todayKey }));
   }, [now, plans]);
 
-  const loadPlans = useCallback(async (id: string) => {
-    if (BROWSER_ONLY_STORAGE) {
-      replacePlans(readLocalPlans(id));
-      setActiveStorageMode("local");
+  const loadPlans = useCallback(async () => {
+    const requestId = loadRequestIdRef.current + 1;
+    const startedMutationVersion = mutationVersionRef.current;
+    loadRequestIdRef.current = requestId;
+    loadingRef.current = true;
+    setLoading(true);
+    setSyncError("");
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      setSyncError(
+        getSupabaseConfigurationError() ?? getPlanErrorMessage("불러오지"),
+      );
+      loadingRef.current = false;
       setLoading(false);
       return;
     }
 
     try {
-      const response = await fetch(`/api/plans?clientId=${encodeURIComponent(id)}`, {
-        cache: "no-store",
-      });
-      const payload = await readJson<{ plans: Plan[] }>(response);
-      replacePlans(payload.plans);
-      setActiveStorageMode("server");
-    } catch (error) {
-      if (!shouldUseLocalFallback(error)) throw error;
-      replacePlans(readLocalPlans(id));
-      setActiveStorageMode("local");
+      const loadedPlans: Plan[] = [];
+      for (let from = 0; ; from += SUPABASE_PAGE_SIZE) {
+        const { data, error } = await supabase
+          .from("plans")
+          .select("*")
+          .eq("user_id", userId)
+          .order("date", { ascending: true })
+          .order("start", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, from + SUPABASE_PAGE_SIZE - 1);
+
+        if (error) throw error;
+        loadedPlans.push(...(data ?? []).map(fromSupabasePlanRow));
+        if (!data || data.length < SUPABASE_PAGE_SIZE) break;
+      }
+      if (
+        requestId === loadRequestIdRef.current &&
+        startedMutationVersion === mutationVersionRef.current
+      ) {
+        replacePlans(loadedPlans);
+      }
+    } catch {
+      if (
+        requestId === loadRequestIdRef.current &&
+        startedMutationVersion === mutationVersionRef.current
+      ) {
+        setSyncError(getPlanErrorMessage("불러오지"));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) {
+        loadingRef.current = false;
+        setLoading(false);
+      }
     }
-  }, [replacePlans, setActiveStorageMode]);
+  }, [replacePlans, userId]);
 
   useEffect(() => {
-    if (!clientId) return;
-    const timer = window.setTimeout(() => void loadPlans(clientId), 0);
+    const timer = window.setTimeout(() => void loadPlans(), 0);
     return () => window.clearTimeout(timer);
-  }, [clientId, loadPlans]);
+  }, [loadPlans]);
+
+  useEffect(() => {
+    if (
+      loading ||
+      !clientId ||
+      legacyCheckStartedRef.current ||
+      hasImportedLegacyPlans(userId, clientId)
+    ) {
+      return;
+    }
+
+    legacyCheckStartedRef.current = true;
+    let active = true;
+    void readLegacyPlans(clientId).then(({ plans: foundPlans, complete }) => {
+      if (!active) return;
+      setLegacyDiscoveryComplete(complete);
+      const remoteSignatures = new Set(
+        plansRef.current.map(getPlanSignature),
+      );
+      const candidates = foundPlans.filter(
+        (plan) => !remoteSignatures.has(getPlanSignature(plan)),
+      );
+
+      if (candidates.length) {
+        setLegacyPlans(candidates);
+      } else if (complete) {
+        markLegacyPlansImported(userId, clientId);
+      }
+
+      if (!complete) {
+        setLegacyMessageIsError(true);
+        setLegacyMessage(
+          "예전 온라인 계획을 확인하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.",
+        );
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [clientId, legacyDiscoveryAttempt, loading, userId]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 60_000);
@@ -763,154 +1004,272 @@ export function PlannerApp() {
 
   const createPlan = useCallback(
     async (draft: Omit<PlanDraft, "clientId">) => {
-      if (!clientId) throw new Error("저장 준비 중입니다.");
-
-      const saveInBrowser = () => {
-        const now = new Date().toISOString();
-        const localPlan: Plan = {
-          ...draft,
-          id: makeLocalPlanId(),
-          clientId,
-          occurrenceStatuses: draft.occurrenceStatuses ?? {},
-          createdAt: now,
-          updatedAt: now,
-        };
-        replaceWithLocalPlans(clientId, [...plansRef.current, localPlan]);
-        return localPlan;
-      };
-
-      if (storageModeRef.current === "local") return saveInBrowser();
+      const supabase = getSupabaseClient();
+      const message = getPlanErrorMessage("저장하지");
+      if (loadingRef.current) {
+        throw new Error("계획을 불러온 뒤 다시 저장해 주세요.");
+      }
+      if (!supabase) {
+        setSyncError(getSupabaseConfigurationError() ?? message);
+        throw new Error(message);
+      }
 
       try {
-        const response = await fetch("/api/plans", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ ...draft, clientId }),
-        });
-        const payload = await readJson<{ plan: Plan }>(response);
-        replacePlans([...plansRef.current, payload.plan]);
-        return payload.plan;
-      } catch (error) {
-        if (!shouldUseLocalFallback(error)) throw error;
-        return saveInBrowser();
+        const { data, error } = await supabase
+          .from("plans")
+          .insert(
+            toSupabasePlanInsert(
+              {
+                ...draft,
+                occurrenceStatuses: draft.occurrenceStatuses ?? {},
+              },
+              userId,
+            ),
+          )
+          .select("*")
+          .single();
+
+        if (error) throw error;
+        const savedPlan = fromSupabasePlanRow(data);
+        mutationVersionRef.current += 1;
+        replacePlans([...plansRef.current, savedPlan]);
+        setLoading(false);
+        setSyncError("");
+        return savedPlan;
+      } catch {
+        setSyncError(message);
+        throw new Error(message);
       }
     },
-    [clientId, replacePlans, replaceWithLocalPlans],
+    [replacePlans, userId],
   );
+
+  const importLegacyPlans = useCallback(async () => {
+    if (!legacyPlans.length || !clientId) return;
+    setLegacyImporting(true);
+    setLegacyMessage("");
+    setLegacyMessageIsError(false);
+
+    try {
+      const existingSignatures = new Set(
+        plansRef.current.map(getPlanSignature),
+      );
+      let importedCount = 0;
+
+      for (const legacyPlan of legacyPlans) {
+        const signature = getPlanSignature(legacyPlan);
+        if (existingSignatures.has(signature)) continue;
+        await createPlan({
+          title: legacyPlan.title,
+          date: legacyPlan.date,
+          start: legacyPlan.start,
+          end: legacyPlan.end,
+          repeat: legacyPlan.repeat,
+          category: legacyPlan.category,
+          memo: legacyPlan.memo,
+          status: legacyPlan.repeat?.length ? "planned" : legacyPlan.status,
+          occurrenceStatuses: legacyPlan.occurrenceStatuses ?? {},
+          source: legacyPlan.source,
+        });
+        existingSignatures.add(signature);
+        importedCount += 1;
+      }
+
+      if (legacyDiscoveryComplete) {
+        markLegacyPlansImported(userId, clientId);
+      }
+      setLegacyPlans([]);
+      if (legacyDiscoveryComplete) {
+        setLegacyMessage(
+          `기존 계획 ${importedCount}개를 내 계정으로 가져왔습니다.`,
+        );
+      } else {
+        setLegacyMessageIsError(true);
+        setLegacyMessage(
+          `확인된 계획 ${importedCount}개를 가져왔지만 예전 온라인 계획은 아직 확인하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.`,
+        );
+      }
+    } catch {
+      const importedSignatures = new Set(
+        plansRef.current.map(getPlanSignature),
+      );
+      setLegacyPlans((current) =>
+        current.filter(
+          (plan) => !importedSignatures.has(getPlanSignature(plan)),
+        ),
+      );
+      setLegacyMessageIsError(true);
+      setLegacyMessage(
+        "일부 계획만 가져왔습니다. 연결을 확인한 뒤 남은 계획을 다시 가져와 주세요.",
+      );
+    } finally {
+      setLegacyImporting(false);
+    }
+  }, [
+    clientId,
+    createPlan,
+    legacyDiscoveryComplete,
+    legacyPlans,
+    userId,
+  ]);
+
+  const retryLegacyDiscovery = useCallback(() => {
+    legacyCheckStartedRef.current = false;
+    setLegacyMessage("");
+    setLegacyMessageIsError(false);
+    setLegacyDiscoveryAttempt((value) => value + 1);
+  }, []);
 
   const changeStatus = useCallback(
     async (
       plan: PlanOccurrence,
       status: "completed" | "incomplete",
     ) => {
-      const updateInBrowser = () => {
+      if (loadingRef.current) return;
+      if (pendingPlanIdsRef.current.has(plan.id)) return;
+      setPlanPending(plan.id, true);
+      const message = getPlanErrorMessage("변경하지");
+      try {
+        const supabase = getSupabaseClient();
+        if (!supabase) throw new Error(message);
         const storedPlan =
           plansRef.current.find((item) => item.id === plan.id) ?? plan;
         const isRecurring = Boolean(storedPlan.repeat?.length);
-        const updatedPlan: Plan = {
-          ...storedPlan,
-          status: isRecurring ? "planned" : status,
-          occurrenceStatuses: isRecurring
+        if (
+          isRecurring &&
+          !planOccursOnDate(storedPlan, plan.occurrenceDate)
+        ) {
+          throw new Error("이 반복 계획의 날짜가 아닙니다.");
+        }
+
+        let basePlan = storedPlan;
+        let updatedPlan: Plan | null = null;
+
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const update = isRecurring
             ? {
-                ...(storedPlan.occurrenceStatuses ?? {}),
-                [plan.occurrenceDate]: status,
+                status: "planned" as const,
+                occurrenceStatuses: {
+                  ...(basePlan.occurrenceStatuses ?? {}),
+                  [plan.occurrenceDate]: status,
+                },
               }
-            : storedPlan.occurrenceStatuses,
-          updatedAt: new Date().toISOString(),
-        };
-        replaceWithLocalPlans(
-          clientId,
+            : {
+                status,
+                occurrenceStatuses: basePlan.occurrenceStatuses,
+              };
+          const nowIso = new Date().toISOString();
+          const nextUpdatedAt =
+            nowIso === basePlan.updatedAt
+              ? new Date(Date.now() + attempt + 1).toISOString()
+              : nowIso;
+          let updateRequest = supabase
+            .from("plans")
+            .update({
+              ...toSupabasePlanUpdate(update),
+              updated_at: nextUpdatedAt,
+            })
+            .eq("id", plan.id)
+            .eq("user_id", userId);
+
+          if (isRecurring) {
+            updateRequest = updateRequest.eq(
+              "updated_at",
+              basePlan.updatedAt,
+            );
+          }
+
+          const { data, error } = await updateRequest
+            .select("*")
+            .maybeSingle();
+          if (error) throw error;
+
+          if (data) {
+            updatedPlan = fromSupabasePlanRow(data);
+            break;
+          }
+          if (!isRecurring) {
+            throw new Error(message);
+          }
+
+          const { data: latestRow, error: latestError } = await supabase
+            .from("plans")
+            .select("*")
+            .eq("id", plan.id)
+            .eq("user_id", userId)
+            .single();
+          if (latestError) throw latestError;
+          basePlan = fromSupabasePlanRow(latestRow);
+        }
+
+        if (!updatedPlan) throw new Error(message);
+        mutationVersionRef.current += 1;
+        replacePlans(
           plansRef.current.map((item) =>
             item.id === plan.id ? updatedPlan : item,
           ),
         );
-        return updatedPlan;
-      };
-
-      let updatedPlan: Plan;
-      if (storageModeRef.current === "local") {
-        updatedPlan = updateInBrowser();
-      } else {
-        try {
-          const response = await fetch("/api/plans", {
-            method: "PATCH",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(
-              plan.repeat?.length
-                ? {
-                    clientId,
-                    id: plan.id,
-                    occurrenceDate: plan.occurrenceDate,
-                    occurrenceStatus: status,
-                  }
-                : { clientId, id: plan.id, status },
-            ),
+        setLoading(false);
+        setSelectedPlan((current) =>
+          current?.id === plan.id &&
+          current.occurrenceDate === plan.occurrenceDate
+            ? {
+                ...updatedPlan,
+                occurrenceDate: current.occurrenceDate,
+              }
+            : current,
+        );
+        setSyncError("");
+        const dialogue = getCharacterDialogue(status, reactionIndex);
+        if (dialogue) {
+          setReaction({
+            name: dialogue.character,
+            line: dialogue.message,
+            kind: status,
           });
-          const payload = await readJson<{ plan: Plan }>(response);
-          updatedPlan = payload.plan;
-          replacePlans(
-            plansRef.current.map((item) =>
-              item.id === plan.id ? updatedPlan : item,
-            ),
-          );
-        } catch (error) {
-          if (!shouldUseLocalFallback(error)) throw error;
-          updatedPlan = updateInBrowser();
         }
+        setReactionIndex((value) => value + 1);
+      } catch {
+        setSyncError(message);
+      } finally {
+        setPlanPending(plan.id, false);
       }
-
-      setSelectedPlan((current) =>
-        current?.id === plan.id &&
-        current.occurrenceDate === plan.occurrenceDate
-          ? {
-              ...updatedPlan,
-              occurrenceDate: current.occurrenceDate,
-            }
-          : current,
-      );
-      const dialogue = getCharacterDialogue(status, reactionIndex);
-      if (dialogue) {
-        setReaction({
-          name: dialogue.character,
-          line: dialogue.message,
-          kind: status,
-        });
-      }
-      setReactionIndex((value) => value + 1);
     },
-    [clientId, reactionIndex, replacePlans, replaceWithLocalPlans],
+    [reactionIndex, replacePlans, setPlanPending, userId],
   );
 
   const deletePlan = useCallback(
     async (plan: Plan) => {
-      const deleteInBrowser = () => {
-        replaceWithLocalPlans(
-          clientId,
+      if (loadingRef.current) return;
+      if (pendingPlanIdsRef.current.has(plan.id)) return;
+      setPlanPending(plan.id, true);
+      const message = getPlanErrorMessage("삭제하지");
+      try {
+        const supabase = getSupabaseClient();
+        if (!supabase) throw new Error(message);
+        const { error } = await supabase
+          .from("plans")
+          .delete()
+          .eq("id", plan.id)
+          .eq("user_id", userId)
+          .select("id")
+          .single();
+
+        if (error) throw error;
+        mutationVersionRef.current += 1;
+        replacePlans(
           plansRef.current.filter((item) => item.id !== plan.id),
         );
-      };
-
-      if (storageModeRef.current === "local") {
-        deleteInBrowser();
-      } else {
-        try {
-          const response = await fetch(
-            `/api/plans?clientId=${encodeURIComponent(clientId)}&id=${plan.id}`,
-            { method: "DELETE" },
-          );
-          await readJson<{ deletedId: number }>(response);
-          replacePlans(
-            plansRef.current.filter((item) => item.id !== plan.id),
-          );
-        } catch (error) {
-          if (!shouldUseLocalFallback(error)) throw error;
-          deleteInBrowser();
-        }
+        setLoading(false);
+        setSelectedPlan(null);
+        setSyncError("");
+      } catch {
+        setSyncError(message);
+      } finally {
+        setPlanPending(plan.id, false);
       }
-
-      setSelectedPlan(null);
     },
-    [clientId, replacePlans, replaceWithLocalPlans],
+    [replacePlans, setPlanPending, userId],
   );
 
   const decidedPlans = getAssessedPlanOccurrences(plans);
@@ -967,10 +1326,17 @@ export function PlannerApp() {
         </div>
         <div className="profile-block">
           <i>梅</i>
-          <div>
+          <div className="profile-copy">
             <strong>수련생</strong>
-            <span>오늘도 한 걸음</span>
+            <span title={userEmail}>{userEmail}</span>
           </div>
+          <button
+            className="account-signout"
+            type="button"
+            onClick={() => void onSignOut()}
+          >
+            로그아웃
+          </button>
         </div>
         <nav aria-label="주요 메뉴">
           {NAV_ITEMS.map((item) => (
@@ -994,18 +1360,71 @@ export function PlannerApp() {
       <header className="mobile-header">
         <i className="mobile-seal">梅</i>
         <strong>매화수련록</strong>
-        <span>{formatKoreanDate(new Date())}</span>
+        <div className="mobile-account">
+          <span title={userEmail}>{userEmail}</span>
+          <button
+            type="button"
+            aria-label="현재 브라우저에서 로그아웃"
+            onClick={() => void onSignOut()}
+          >
+            로그아웃
+          </button>
+        </div>
       </header>
 
       <main className="main-content">
-        {storageMode === "local" ? (
-          <div className="sync-message" role="status">
-            <span>이 브라우저에 저장 중</span>
-            {!BROWSER_ONLY_STORAGE ? (
-              <button onClick={() => clientId && void loadPlans(clientId)}>
-                서버 다시 연결
+        {syncError ? (
+          <div className="sync-message sync-error-message" role="alert">
+            <span>{syncError}</span>
+            <button type="button" onClick={() => void loadPlans()}>
+              다시 불러오기
+            </button>
+          </div>
+        ) : null}
+
+        {legacyPlans.length ? (
+          <div className="sync-message legacy-import-message" role="status">
+            <span>
+              이 기기에서 예전에 만든 계획 {legacyPlans.length}개를
+              찾았습니다. 현재 계정({userEmail})으로 복사하며 원본은
+              그대로 남습니다.
+            </span>
+            <button
+              type="button"
+              disabled={legacyImporting || Boolean(syncError)}
+              onClick={() => void importLegacyPlans()}
+            >
+              {legacyImporting ? "가져오는 중…" : "내 계정으로 가져오기"}
+            </button>
+          </div>
+        ) : null}
+
+        {legacyMessage ? (
+          <div
+            className="sync-message import-result-message"
+            role={legacyMessageIsError ? "alert" : "status"}
+          >
+            <span>{legacyMessage}</span>
+            {legacyMessageIsError ? (
+              <>
+                {legacyPlans.length ? (
+                  <button
+                    type="button"
+                    disabled={legacyImporting || Boolean(syncError)}
+                    onClick={() => void importLegacyPlans()}
+                  >
+                    남은 계획 가져오기
+                  </button>
+                ) : null}
+                <button type="button" onClick={retryLegacyDiscovery}>
+                  기존 저장소 다시 확인
+                </button>
+              </>
+            ) : (
+              <button type="button" onClick={() => setLegacyMessage("")}>
+                닫기
               </button>
-            ) : null}
+            )}
           </div>
         ) : null}
 
@@ -1035,6 +1454,14 @@ export function PlannerApp() {
 
             {loading ? (
               <div className="loading-paper paper-card">계획표를 펼치는 중…</div>
+            ) : syncError && plans.length === 0 ? (
+              <div className="load-error-paper paper-card" role="alert">
+                <strong>계획을 확인하지 못했습니다.</strong>
+                <p>연결을 확인한 뒤 다시 불러와 주세요.</p>
+                <button type="button" onClick={() => void loadPlans()}>
+                  다시 불러오기
+                </button>
+              </div>
             ) : plans.length === 0 ? (
               <EmptyPlanner onCreate={() => navigateToPage("create")} />
             ) : plannerView === "week" ? (
@@ -1124,6 +1551,7 @@ export function PlannerApp() {
                         now={now}
                         onStatus={(plan, status) => void changeStatus(plan, status)}
                         onDelete={(plan) => void deletePlan(plan)}
+                        pendingPlanIds={pendingPlanIds}
                       />
                     ) : (
                       <section className="paper-card circle-card">
@@ -1160,7 +1588,8 @@ export function PlannerApp() {
 
         {page === "create" ? (
           <CreatePlanPage
-            clientReady={Boolean(clientId)}
+            clientReady={!loading && !syncError}
+            existingPlanSignatures={existingPlanSignatures}
             onCreate={createPlan}
             onFinished={() => {
               setPlannerView("week");
@@ -1321,11 +1750,25 @@ export function PlannerApp() {
             {selectedPlan.memo ? <p>{selectedPlan.memo}</p> : null}
             {effectiveStatus(selectedPlan, now) === "unconfirmed" ? (
               <div className="sheet-actions">
-                <button onClick={() => void changeStatus(selectedPlan, "completed")}>완료했어</button>
-                <button onClick={() => void changeStatus(selectedPlan, "incomplete")}>못 했어</button>
+                <button
+                  disabled={pendingPlanIds.has(selectedPlan.id)}
+                  onClick={() => void changeStatus(selectedPlan, "completed")}
+                >
+                  완료했어
+                </button>
+                <button
+                  disabled={pendingPlanIds.has(selectedPlan.id)}
+                  onClick={() => void changeStatus(selectedPlan, "incomplete")}
+                >
+                  못 했어
+                </button>
               </div>
             ) : null}
-            <button className="sheet-delete" onClick={() => void deletePlan(selectedPlan)}>
+            <button
+              className="sheet-delete"
+              disabled={pendingPlanIds.has(selectedPlan.id)}
+              onClick={() => void deletePlan(selectedPlan)}
+            >
               {selectedPlan.repeat?.length
                 ? "반복 계획 전체 삭제"
                 : "이 계획 삭제"}
@@ -1350,10 +1793,12 @@ export function PlannerApp() {
 
 function CreatePlanPage({
   clientReady,
+  existingPlanSignatures,
   onCreate,
   onFinished,
 }: {
   clientReady: boolean;
+  existingPlanSignatures: ReadonlySet<string>;
   onCreate: (draft: Omit<PlanDraft, "clientId">) => Promise<Plan>;
   onFinished: () => void;
 }) {
@@ -1495,14 +1940,28 @@ function CreatePlanPage({
     setSaving(true);
     setMessage("");
     setAutoSaveMessage("");
+    let processedCount = 0;
+    const knownSignatures = new Set(existingPlanSignatures);
     try {
       for (const item of preview) {
+        const signature = getPlanSignature(item);
+        if (knownSignatures.has(signature)) {
+          processedCount += 1;
+          continue;
+        }
         await onCreate(item);
+        knownSignatures.add(signature);
+        processedCount += 1;
       }
       onFinished();
     } catch (error) {
+      setPreview((current) => current.slice(processedCount));
+      const detail =
+        error instanceof Error ? error.message : "계획표를 저장하지 못했습니다.";
       setAutoSaveMessage(
-        error instanceof Error ? error.message : "계획표를 저장하지 못했습니다.",
+        processedCount > 0
+          ? `${processedCount}개는 이미 저장했습니다. 남은 계획만 다시 저장해 주세요. ${detail}`
+          : detail,
       );
     } finally {
       setSaving(false);
